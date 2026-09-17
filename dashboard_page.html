@@ -113,7 +113,7 @@
     <div class="tab on" onclick="showTab('live',this)">⚡ 实时盘面</div>
     <div class="tab" onclick="showTab('hist',this)">📜 历史记录</div>
     <div class="tab" onclick="showTab('strat',this)">📊 策略分析<span style="font-size:10px;color:#adbac7">(逃杀)</span></div>
-    <div class="tab" onclick="showTab('bot',this)">🤖 自动下注<span style="font-size:10px;color:#adbac7">(逃杀)</span></div>
+    <div class="tab" onclick="showTab('bot',this)">🤖 自动下注</div>
     <div class="tab" onclick="showTab('hv',this)">📦 仓库收取</div>
     <div class="tab" onclick="showTab('settings',this)">⚙️ 设置</div>
   </div>
@@ -166,33 +166,32 @@
             近 <span id="sim-rounds">--</span> 回合 ·
             <a onclick="refreshSim()" style="color:var(--blue);cursor:pointer">刷新</a>
           </span></h3>
-        <div class="hint" style="margin-bottom:8px">六个策略对真实回合做模拟下注（每注按 5 彩石虚拟计），点击卡片展开逐回合输赢。</div>
+        <div class="pills" id="simpills" style="margin-bottom:8px"></div>
+        <div class="hint" style="margin-bottom:8px">各策略对真实回合做模拟下注（每注按 5 彩石虚拟计），点击卡片展开逐回合输赢。选房与实盘引擎同源（采集器 T-5s 统一决策）。</div>
         <div id="sim-list"></div>
       </div>
     </div>
     <div>
 <div class="panel">
-        <h3>🤖 自动下注设置（星海逃杀）</h3>
+        <h3 id="bot-title">🤖 自动下注设置（逃杀）</h3>
+        <div class="pills" id="botpills" style="margin-bottom:10px"></div>
         <div class="toggle">
           <span style="font-size:15px;font-weight:700" id="bot-state">未启动</span>
           <span class="hint" id="bot-sub"></span>
         </div>
         <div class="grid2" style="grid-template-columns:1fr 1fr">
           <div class="frm"><label>策略</label>
-            <select id="f-strategy">
-              <option value="smartev">smartEV（押结构期望最高房）</option>
-              <option value="room1">固定押1号房（实测被杀率最低 7.6%）</option>
-              <option value="maxplayers">押人最多房（击杀偏向人少的房）</option>
-              <option value="follow">跟随最优（每回合自动跟随近30盘收益最高的策略）</option>
-              <option value="minpool">押最小池</option>
-              <option value="maxpool">押最大池</option>
-              <option value="random">随机</option>
+            <select id="f-strategy"></select></div>
+          <div class="frm" id="foxmode-frm" style="display:none"><label>玩法（赛马）</label>
+            <select id="f-foxmode" onchange="onFoxModeChange()">
+              <option value="1">冠军盘（押谁能夺冠）</option>
+              <option value="2">非冠军盘（押谁拿不到冠军）</option>
             </select></div>
-          <div class="frm"><label>每注彩石（0.1 的倍数；自动按官方档位 0.1/1/10 组合下单，如 0.3→0.1×3）</label><input id="f-amount" type="number" step="0.1" min="0.1" value="0.1"></div>
         </div>
+        <div class="frm"><label>每注彩石（0.1 的倍数；自动按官方档位组合下单，如 0.3→0.1×3）</label><input id="f-amount" type="number" step="0.1" min="0.1" value="0.1"></div>
         <div class="frm"><label>今日亏损上限（当天亏损达到即自动暂停，跨天自动重新计算）</label>
           <input id="f-maxloss" type="number" step="0.1" min="0.1" value="10"></div>
-          <div class="frm"><label>今日止盈（当天盈利达到即自动落袋暂停）</label>
+        <div class="frm"><label>今日止盈（当天盈利达到即自动落袋暂停）</label>
           <input id="f-tpprofit" type="number" step="0.1" min="0.1" value="5"></div>
         <div class="row" style="margin-top:6px">
           <button class="btn green" id="btn-on" onclick="botOn()">▶ 开启自动下注</button>
@@ -208,10 +207,10 @@
         <div style="font-size:12px;color:var(--sub);margin-bottom:8px">累计盈亏 <span id="bot-pnl" style="font-size:15px;font-weight:700">0.00</span>
           ｜ 今日盈亏 <span id="bot-today" style="font-size:15px;font-weight:700">0.00</span>
           ｜ 余额 <span id="bot-bal" style="font-size:15px;font-weight:700">--</span>
-          ｜ 今日统计 投入 <span id="gs-consume" style="font-weight:700">--</span>
+          ｜ <span id="gs-label">逃杀官方统计</span> 投入 <span id="gs-consume" style="font-weight:700">--</span>
           / 收入 <span id="gs-gain" style="font-weight:700">--</span></div>
         <table class="bets" id="bettbl">
-          <tr><th>时间</th><th>回合</th><th>房间</th><th>金额</th><th>结果</th><th>盈亏</th></tr>
+          <tr><th>时间</th><th>回合</th><th id="b-roomlabel">房间</th><th>金额</th><th>结果</th><th>盈亏</th></tr>
         </table>
       </div>
     </div>
@@ -291,10 +290,10 @@
 
 <script>
 const CFG = {
-  steal: { name:'逃杀', slots:8, label:i=>i+'号·'+({1:'货舱',2:'医务室',3:'休息室',4:'维生舱',5:'指挥室',6:'食堂',7:'通讯室',8:'操作台'})[i],
+  steal: { name:'逃杀', slots:8, betStatus:2, label:i=>i+'号·'+({1:'货舱',2:'医务室',3:'休息室',4:'维生舱',5:'指挥室',6:'食堂',7:'通讯室',8:'操作台'})[i],
            statusMap:{1:'等待开始',2:'下注中',3:'结算中'} },
-  cock:  { name:'斗鸡', slots:2, label:i=>({1:'啄不服',2:'咯无敌'})[i], statusMap:{0:'下注中',1:'比赛中',2:'结算中'} },
-  fox:   { name:'赛马', slots:6, label:i=>['绿晶晶','紫莹莹','蓝溜溜','胖噜噜','黄沙沙','红墩墩'][i-1],
+  cock:  { name:'斗鸡', slots:2, betStatus:0, label:i=>({1:'啄不服',2:'咯无敌'})[i], statusMap:{0:'下注中',1:'比赛中',2:'结算中'} },
+  fox:   { name:'赛马', slots:6, betStatus:0, label:i=>['绿晶晶','紫莹莹','蓝溜溜','胖噜噜','黄沙沙','红墩墩'][i-1],
            statusMap:{0:'准备/下注',1:'比赛中',2:'结算中'} },
 };
 let game = 'steal';
@@ -510,9 +509,43 @@ async function saveToken(){
   refreshToken();
 }
 
-/* ---------- 策略模拟盘 ---------- */
+/* ---------- 策略模拟盘 / 自动下注: 按游戏切换 ---------- */
+let botGame = 'steal', foxMode = 1;
+const STRATS = {
+  steal: [['smartev','smartEV（押结构期望最高房）'],['room1','固定押1号房（实测被杀率最低 7.6%）'],['maxplayers','押人最多房（击杀偏向人少的房）'],['follow','跟随最优（近30盘收益最高策略）'],['minpool','押最小池'],['maxpool','押最大池'],['random','随机']],
+  cock:  [['smartev','smartEV（综合池占比与近期胜率）'],['room1','固定押1号队·啄不服'],['maxplayers','押人最多队'],['follow','跟随最优（近30盘收益最高策略）'],['minpool','押池较小队'],['maxpool','押池较大队'],['random','随机']],
+  fox:   [['smartev','smartEV（历史冠军率×赔率 价值狐）'],['room1','固定押1号狐·绿晶晶'],['maxplayers','押人最多狐'],['follow','跟随最优（近30盘收益最高策略）'],['minpool','押最冷门狐'],['maxpool','押最热门狐'],['random','随机']],
+  foxnc: [['smartev','smartEV（押最可能落败的狐）'],['room1','固定押1号狐·绿晶晶'],['maxplayers','押人最多狐'],['minpool','押非冠军池较小狐'],['maxpool','押非冠军池较大狐'],['random','随机']],
+};
+function buildGamePills(id, cur){
+  document.getElementById(id).innerHTML =
+    Object.entries(CFG).map(([k,c])=>`<div class="pill ${k===cur?'on':''}" onclick="setBotGame('${k}')">${c.name}</div>`).join('');
+}
+function setBotGame(k){
+  if(!CFG[k]) return;
+  botGame = k;
+  buildGamePills('botpills', k); buildGamePills('simpills', k);
+  document.getElementById('bot-title').textContent = `🤖 自动下注设置（${CFG[k].name}）`;
+  document.getElementById('foxmode-frm').style.display = k==='fox' ? '' : 'none';
+  document.getElementById('b-roomlabel').textContent = k==='steal' ? '房间' : (k==='cock' ? '队伍' : '目标');
+  document.getElementById('gs-label').textContent = k==='steal' ? '逃杀官方统计' : '逃杀官方统计(参考)';
+  buildStrategy(); refreshBot(); refreshSim(); botLivePoll();
+}
+function buildStrategy(){
+  const sel = document.getElementById('f-strategy');
+  const cur = sel.value;
+  const list = (botGame==='fox' && foxMode==2) ? STRATS.foxnc : STRATS[botGame];
+  sel.innerHTML = list.map(([v,t])=>`<option value="${v}">${t}</option>`).join('');
+  if(list.some(x=>x[0]===cur)) sel.value = cur;
+}
+function onFoxModeChange(){
+  foxMode = parseInt(document.getElementById('f-foxmode').value,10)||1;
+  buildStrategy(); refreshBot(); refreshSim();
+}
 async function refreshSim(){
-  let d; try { d = await (await fetch('/api/bot/sim')).json(); } catch(e){ return; }
+  let d; try {
+    d = await (await fetch(`/api/bot/sim?game=${botGame}${botGame==='fox'?`&mode=${foxMode}`:''}`)).json();
+  } catch(e){ return; }
   if(d.error){ document.getElementById('sim-list').innerHTML = '<div class="hint">'+d.error+'</div>'; return; }
   document.getElementById('sim-rounds').textContent = d.rounds;
   document.getElementById('sim-list').innerHTML = d.strats.map(s => `
@@ -524,7 +557,7 @@ async function refreshSim(){
       </div>
       <div class="sim-body">
         <div style="margin-bottom:6px" class="hint">最近 ${s.detail.length} 回合（点标签收起）：</div>
-        ${s.detail.map(x=>`<span class="wchip ${x.win?'w':'l'}">${x.roundId}房${x.room} ${x.win?'赢':'输'}${x.pnl>=0?'+':''}${x.pnl.toFixed(2)}</span>`).join('')}
+        ${s.detail.map(x=>`<span class="wchip ${x.win?'w':'l'}">${x.roundId} 押${x.room}号 ${x.win?'赢':'输'}${x.pnl>=0?'+':''}${x.pnl.toFixed(2)}</span>`).join('')}
       </div>
     </div>`).join('');
 }
@@ -532,28 +565,28 @@ function toggleSim(k){
   document.getElementById('sim-'+k).classList.toggle('open');
 }
 setInterval(()=>{ if(!document.getElementById('bot').classList.contains('hide')) refreshSim(); }, 30000);
-refreshSim();
 
 /* ---------- 回合简报 ---------- */
 let botLive = null;
 async function botLivePoll(){
-  try { botLive = await (await fetch('/api/live?game=steal')).json(); } catch(e){}
+  try { botLive = await (await fetch('/api/live?game='+botGame)).json(); } catch(e){}
 }
 function botLiveTick(){
   if(!botLive || botLive.empty) return;
   document.getElementById('b-round').textContent = botLive.roundId ?? '--';
-  const sm = {1:'等待开始',2:'下注中',3:'结算中'};
+  const sm = CFG[botGame].statusMap;
   document.getElementById('b-status').textContent = sm[botLive.status] ?? botLive.status;
-  const tot = Object.values(botLive.pools||{}).reduce((a,b)=>a+b,0);
+  const src = (botGame==='fox' && foxMode==2) ? (botLive.poolsNc||{}) : (botLive.pools||{});
+  const tot = Object.values(src).reduce((a,b)=>a+b,0);
   document.getElementById('b-pool').textContent = tot.toFixed(0);
   const cd = document.getElementById('b-cd');
-  if(botLive.status===2 && botLive.countdownEndTime){
+  if(botLive.status===CFG[botGame].betStatus && botLive.countdownEndTime){
     const s = (botLive.countdownEndTime - Date.now())/1000;
     if(s>0){ cd.textContent = s.toFixed(0); cd.style.color = s<=10?'var(--red)':'var(--blue)'; }
-    else { cd.textContent='0'; cd.style.color='var(--red)'; }
-  } else { cd.textContent='--'; cd.style.color='var(--sub)'; }
+    else { cd.textContent='0'; cd.style.color = 'var(--red)'; }
+  } else { cd.textContent='--'; cd.style.color = 'var(--sub)'; }
 }
-setInterval(botLivePoll, 3000); botLivePoll();
+setInterval(botLivePoll, 3000);
 setInterval(botLiveTick, 1000);
 
 /* ---------- 仓库自动收取 ---------- */
@@ -596,20 +629,27 @@ async function botOn(){
     amount:parseFloat(document.getElementById('f-amount').value)||0.1,
     max_loss:parseFloat(document.getElementById('f-maxloss').value)||10,
     take_profit:parseFloat(document.getElementById('f-tpprofit').value)||5 };
-  const d = await (await fetch('/api/bot/config', {method:'POST',
+  if(botGame==='fox') cfg.fox_bet_type = foxMode;
+  const d = await (await fetch(`/api/bot/config?game=${botGame}`, {method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg)})).json();
   document.getElementById('bot-msg').textContent = d.code===0 ? '' : ('❌ '+d.msg);
   refreshBot();
 }
 async function botOff(){
-  await fetch('/api/bot/config', {method:'POST', headers:{'Content-Type':'application/json'},
+  await fetch(`/api/bot/config?game=${botGame}`, {method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({enabled:false})});
   refreshBot();
 }
 async function refreshBot(){
   const [cfg, st] = await Promise.all([
-    (await fetch('/api/bot/config')).json(),
-    (await fetch('/api/bot/status')).json() ]);
+    (await fetch(`/api/bot/config?game=${botGame}`)).json(),
+    (await fetch(`/api/bot/status?game=${botGame}`)).json() ]);
+  if((cfg.game && cfg.game!==botGame) || (st.game && st.game!==botGame)) return; // 切换竞态保护
+  if(botGame==='fox' && cfg.foxBetType){
+    foxMode = cfg.foxBetType===2 ? 2 : 1;
+    document.getElementById('f-foxmode').value = String(foxMode);
+    buildStrategy();
+  }
   document.getElementById('f-strategy').value = cfg.strategy||'smartev';
   document.getElementById('f-amount').value = cfg.amount??0.1;
   document.getElementById('f-maxloss').value = cfg.max_loss??10;
@@ -629,10 +669,17 @@ async function refreshBot(){
   }
   document.getElementById('bot-sub').textContent =
     `策略 ${st.strategy} · 每注 ${st.amount} · 亏限 ${st.maxLoss} · 止盈 ${st.takeProfit}` +
+    (botGame==='fox' ? ` · ${foxMode===2?'非冠军盘':'冠军盘'}` : '') +
     (st.stopReason ? ` · 停止原因: ${st.stopReason}` : '');
-  // 累计/今日盈亏均由 refreshGameStat 用游戏官方口径独占更新, 此处不再覆盖
+  // 盈亏: 逃杀由 refreshGameStat 用官方口径独占更新; 斗鸡/赛马用本游戏 bet_log 口径
+  if(botGame!=='steal'){
+    const p = document.getElementById('bot-pnl');
+    p.textContent = (st.pnl>=0?'+':'')+(st.pnl??0).toFixed(3); p.className = (st.pnl>=0)?'pos':'neg';
+    const t = document.getElementById('bot-today');
+    t.textContent = (st.todayPnl>=0?'+':'')+st.todayPnl.toFixed(3); t.className = (st.todayPnl>=0)?'pos':'neg';
+  }
   document.getElementById('bettbl').innerHTML =
-    '<tr><th>时间</th><th>回合</th><th>房间</th><th>金额</th><th>结果</th><th>盈亏</th></tr>' +
+    '<tr><th>时间</th><th>回合</th><th>'+document.getElementById('b-roomlabel').textContent+'</th><th>金额</th><th>结果</th><th>盈亏</th></tr>' +
     (st.bets||[]).map(b=>`<tr><td>${b.time}</td><td>${b.roundId}</td><td>${b.room}</td>
       <td>${b.amount}</td><td>${b.status}</td>
       <td class="${cls(b.pnl)}">${(b.pnl>=0?'+':'')}${(b.pnl??0).toFixed(3)}</td></tr>`).join('');
@@ -651,6 +698,7 @@ async function refreshBotBal(){
 }
 setInterval(()=>{ if(!document.getElementById('bot').classList.contains('hide')){ refreshBot(); } }, 5000);
 async function refreshGameStat(){
+  if(botGame!=='steal') return;  // 官方口径目前只覆盖逃杀, 其他游戏用 bet_log 口径
   try {
     const d = await (await fetch('/api/bot/gamestat')).json();
     if(d.code===0){
@@ -667,7 +715,9 @@ async function refreshGameStat(){
   } catch(e){}
 }
 setInterval(()=>{ if(!document.getElementById('bot').classList.contains('hide')) refreshGameStat(); }, 60000);
-refreshGameStat();
+buildGamePills('botpills', botGame); buildGamePills('simpills', botGame);
+buildStrategy();
+setBotGame('steal');
 refreshToken();
 refreshBotBal();
 refreshLive();

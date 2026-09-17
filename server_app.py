@@ -54,13 +54,14 @@ LOG_DIR = DATA
 
 GAMES = {
     "steal": {"name": "逃杀", "host": "xdy.lululu.com.cn", "url": "wss://xdy.lululu.com.cn/ws",
-              "slots": 8, "init": ["2001", "2007"], "refresh": ["2001"]},
+              "slots": 8, "init": ["2001", "2007"], "refresh": ["2001"], "bet_status": 2},
     "cock": {"name": "斗鸡", "host": "lh.lululu.com.cn", "url": "wss://lh.lululu.com.cn/ws",
-             "slots": 2, "init": ["2001", "2013"], "refresh": ["2001"]},
+             "slots": 2, "init": ["2001", "2013"], "refresh": ["2001"], "bet_status": 0},
     "fox": {"name": "赛马", "host": "race.lululu.com.cn", "url": "wss://race.lululu.com.cn/ws",
-            "slots": 6, "init": ["2001", "2011", "2012"], "refresh": ["2001", "2011"]},
+            "slots": 6, "init": ["2001", "2011", "2012"], "refresh": ["2001", "2011"], "bet_status": 0},
 }
 STEAL = GAMES["steal"]
+COCK_ODDS = 1.95  # 斗鸡固定赔率(客户端口径, 实测)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("server")
@@ -80,18 +81,57 @@ def init_db():
             pw_hash TEXT NOT NULL, salt TEXT NOT NULL,
             lulu_token TEXT DEFAULT '', lulu_userid INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        _migrate_bot_state(c)
         c.execute("""CREATE TABLE IF NOT EXISTS bot_state(
-            user_id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL, game TEXT NOT NULL DEFAULT 'steal',
             strategy TEXT DEFAULT 'smartev', amount REAL DEFAULT 0.1,
             max_loss REAL DEFAULT 10.0, enabled INTEGER DEFAULT 0,
-            pnl REAL DEFAULT 0, stop_reason TEXT DEFAULT '')""")
+            pnl REAL DEFAULT 0, stop_reason TEXT DEFAULT '',
+            bet_lead REAL DEFAULT 3.0, take_profit REAL DEFAULT 5.0,
+            fox_bet_type INTEGER DEFAULT 1,
+            PRIMARY KEY(user_id, game))""")
         c.execute("""CREATE TABLE IF NOT EXISTS official_daily(
             user_id INTEGER, day TEXT, net REAL, consume REAL, gain REAL,
             UNIQUE(user_id, day))""")
         c.execute("""CREATE TABLE IF NOT EXISTS bet_log(
             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
-            ts TEXT, round_id INTEGER, room INTEGER, amount REAL,
+            game TEXT DEFAULT 'steal', ts TEXT, day TEXT DEFAULT '',
+            round_id INTEGER, room INTEGER, amount REAL,
             status TEXT, pnl REAL DEFAULT 0)""")
+        # 增量补列(老库兼容)
+        for tbl, col, ddl in [("bot_state", "fox_bet_type", "INTEGER DEFAULT 1"),
+                              ("bot_state", "bet_lead", "REAL DEFAULT 3.0"),
+                              ("bot_state", "take_profit", "REAL DEFAULT 5.0"),
+                              ("bet_log", "game", "TEXT DEFAULT 'steal'"),
+                              ("bet_log", "day", "TEXT DEFAULT ''")]:
+            cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
+            if cols and col not in cols:
+                c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {ddl}")
+
+
+def _migrate_bot_state(c):
+    """老版 bot_state 是 user_id 单列主键(仅逃杀) -> 迁成 (user_id, game) 复合主键"""
+    cols = [r[1] for r in c.execute("PRAGMA table_info(bot_state)").fetchall()]
+    if not cols or "game" in cols:
+        return
+    c.execute("ALTER TABLE bot_state RENAME TO bot_state_old")
+    c.execute("""CREATE TABLE bot_state(
+        user_id INTEGER NOT NULL, game TEXT NOT NULL DEFAULT 'steal',
+        strategy TEXT DEFAULT 'smartev', amount REAL DEFAULT 0.1,
+        max_loss REAL DEFAULT 10.0, enabled INTEGER DEFAULT 0,
+        pnl REAL DEFAULT 0, stop_reason TEXT DEFAULT '',
+        bet_lead REAL DEFAULT 3.0, take_profit REAL DEFAULT 5.0,
+        fox_bet_type INTEGER DEFAULT 1,
+        harvest_enabled INTEGER DEFAULT 0, last_harvest_ts TEXT DEFAULT '',
+        last_harvest_amt REAL DEFAULT 0, last_harvest_epoch REAL DEFAULT 0,
+        harvest_period REAL DEFAULT 0, harvest_target REAL DEFAULT 0,
+        harvest_next REAL DEFAULT 0, harvest_seen_qty REAL DEFAULT 0,
+        PRIMARY KEY(user_id, game))""")
+    common = [x for x in cols if x != "id"]
+    c.execute(f"INSERT OR IGNORE INTO bot_state({','.join(common)}) "
+              f"SELECT {','.join(common)} FROM bot_state_old")
+    c.execute("DROP TABLE bot_state_old")
+    log.info("bot_state 已迁移为 (user_id, game) 复合主键")
 
 
 def hash_pw(pw, salt):
@@ -103,27 +143,39 @@ def get_user(uid):
         return c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
 
 
-def get_bot(uid):
+def get_bot(uid, game="steal"):
     with db() as c:
-        r = c.execute("SELECT * FROM bot_state WHERE user_id=?", (uid,)).fetchone()
+        r = c.execute("SELECT * FROM bot_state WHERE user_id=? AND game=?", (uid, game)).fetchone()
         if not r:
-            c.execute("INSERT OR IGNORE INTO bot_state(user_id) VALUES(?)", (uid,))
-            r = c.execute("SELECT * FROM bot_state WHERE user_id=?", (uid,)).fetchone()
+            c.execute("INSERT OR IGNORE INTO bot_state(user_id, game) VALUES(?,?)", (uid, game))
+            r = c.execute("SELECT * FROM bot_state WHERE user_id=? AND game=?", (uid, game)).fetchone()
         return r
 
 
-def set_bot(uid, **kw):
+def set_bot(uid, game="steal", **kw):
     with db() as c:
+        c.execute("INSERT OR IGNORE INTO bot_state(user_id, game) VALUES(?,?)", (uid, game))
         for k, v in kw.items():
-            c.execute(f"UPDATE bot_state SET {k}=? WHERE user_id=?", (v, uid))
+            c.execute(f"UPDATE bot_state SET {k}=? WHERE user_id=? AND game=?", (v, uid, game))
 
 
-def add_bet(uid, round_id, room, amount, status, pnl):
+def add_bet(uid, game, round_id, room, amount, status, pnl):
     today = game_now().date().isoformat()
     with db() as c:
-        c.execute("INSERT INTO bet_log(user_id,ts,day,round_id,room,amount,status,pnl) VALUES(?,?,?,?,?,?,?,?)",
-                  (uid, game_hm(), today, round_id, room, amount, status, pnl))
-        c.execute("DELETE FROM bet_log WHERE id < (SELECT MIN(id) FROM (SELECT id FROM bet_log WHERE user_id=? ORDER BY id DESC LIMIT 300) t WHERE user_id=?)", (uid, uid))
+        c.execute("INSERT INTO bet_log(user_id,game,ts,day,round_id,room,amount,status,pnl) "
+                  "VALUES(?,?,?,?,?,?,?,?,?)",
+                  (uid, game, game_hm(), today, round_id, room, amount, status, pnl))
+        c.execute("DELETE FROM bet_log WHERE id < (SELECT MIN(id) FROM "
+                  "(SELECT id FROM bet_log WHERE user_id=? AND game=? ORDER BY id DESC LIMIT 300) t "
+                  "WHERE user_id=? AND game=?)", (uid, game, uid, game))
+
+
+def bet_log_today(uid, game):
+    """某游戏今日自算盈亏(斗鸡/赛马的止盈止损口径)"""
+    today = game_now().date().isoformat()
+    with db() as c:
+        return c.execute("SELECT COALESCE(SUM(pnl),0) FROM bet_log "
+                         "WHERE user_id=? AND game=? AND day=?", (uid, game, today)).fetchone()[0]
 
 
 def ensure_bet_log_day():
@@ -133,7 +185,6 @@ def ensure_bet_log_day():
         if "day" not in cols:
             c.execute("ALTER TABLE bet_log ADD COLUMN day TEXT DEFAULT ''")
             c.execute("UPDATE bet_log SET day=?", (game_now().date().isoformat(),))
-
 
 def write_atomic(path, obj):
     tmp = path + ".tmp"
@@ -172,20 +223,11 @@ def anchor_dns(host):
 
 # ================= 全局采集器 =================
 
-def compute_picks(pools, players, round_id, kill_counts=None, kill_window=0):
-    """统一策略决策: 同一份池子+确定性随机 -> 实盘引擎与模拟盘选房完全一致
-    smartev 为多因子: 结构期望 - 近期被杀频率惩罚(与纯押最小池区分开)"""
+def base_picks(pools, players, round_id, seed_key):
     rooms = sorted(pools.keys())
-    r_ev = {r: room_ev(pools, r) for r in rooms}
-    if kill_counts and kill_window > 0:
-        # 被杀率惩罚: 近期被杀占比越高扣分越多 (λ=0.6, 相当于期望扣 60%×频率)
-        score = {r: r_ev[r] - 0.6 * (kill_counts.get(r, 0) / kill_window) for r in rooms}
-    else:
-        score = r_ev
-    rnd = random.Random(f"round-{round_id}")
+    rnd = random.Random(seed_key)
     return {
         "roundId": round_id,
-        "smartev": max(rooms, key=lambda r: score[r]),
         "minpool": min(rooms, key=lambda r: pools[r]),
         "maxpool": max(rooms, key=lambda r: pools[r]),
         "random": rnd.choice(rooms),
@@ -195,9 +237,109 @@ def compute_picks(pools, players, round_id, kill_counts=None, kill_window=0):
     }
 
 
+def fox_win_rates(win_hist, champ, slots=6):
+    """赛马各狐夺冠概率估计: 2012冠军计数(长样本) + 近20回合冠军频率加权"""
+    cnt = {i: 0.0 for i in range(1, slots + 1)}
+    total = 0.0
+    for item_id, c in (champ or {}).items():
+        try:
+            cnt[int(item_id)] += float(c)
+            total += float(c)
+        except (KeyError, ValueError):
+            continue
+    for w in (win_hist or [])[-20:]:
+        try:
+            cnt[int(w)] += 3.0  # 近期权重: 每次冠军抵3张历史票
+            total += 3.0
+        except (KeyError, ValueError):
+            continue
+    if total <= 0:
+        return {}
+    return {i: c / total for i, c in cnt.items()}
+
+
+def compute_picks(game, pools, players, round_id, kill_counts=None, kill_window=0,
+                  win_hist=None, champ=None):
+    """统一策略决策: 同一份池子+确定性随机 -> 实盘引擎与模拟盘选房完全一致
+    smartev 各游戏口径: 逃杀=结构EV-近期被杀惩罚; 斗鸡=胜率估计×1.95赔率;
+    赛马冠军盘=历史夺冠率×池子隐含赔率(价值狐)"""
+    seed = f"round-{round_id}" if game == "steal" else f"{game}-round-{round_id}"
+    picks = base_picks(pools, players, round_id, seed)
+    rooms = sorted(pools.keys())
+    if game == "steal":
+        r_ev = {r: room_ev(pools, r) for r in rooms}
+        if kill_counts and kill_window > 0:
+            # 被杀率惩罚: 近期被杀占比越高扣分越多 (λ=0.6, 相当于期望扣 60%×频率)
+            score = {r: r_ev[r] - 0.6 * (kill_counts.get(r, 0) / kill_window) for r in rooms}
+        else:
+            score = r_ev
+        picks["smartev"] = max(rooms, key=lambda r: score[r])
+    elif game == "cock":
+        # 胜率估计 = 池占比与近20回合实际胜率各半
+        total = sum(pools.values()) or 1.0
+        recent = (win_hist or [])[-20:]
+        wr = {r: 0.0 for r in rooms}
+        for w in recent:
+            try:
+                wr[int(w)] += 1.0
+            except KeyError:
+                pass
+        n = len(recent) or 1
+        score = {r: (0.5 * pools[r] / total + 0.5 * wr[r] / n) * COCK_ODDS - 1 for r in rooms}
+        picks["smartev"] = max(rooms, key=lambda r: score[r])
+    else:  # fox 冠军盘
+        P = sum(pools.values())
+        p = fox_win_rates(win_hist, champ, slots=len(rooms)) or {r: 1.0 / len(rooms) for r in rooms}
+        score = {r: p.get(r, 0) * FEE * P / max(pools[r], 0.1) for r in rooms}
+        picks["smartev"] = max(rooms, key=lambda r: score[r])
+    return picks
+
+
+def compute_picks_nc(pools_nc, players, round_id, win_hist=None, champ=None):
+    """赛马非冠军盘(押某狐拿不到冠军): smartev=最可能落败且非冠军池中相对冷门的狐"""
+    rooms = sorted(pools_nc.keys())
+    if not rooms:
+        return None
+    picks = base_picks(pools_nc, players, round_id, f"fox-nc-round-{round_id}")
+    p = fox_win_rates(win_hist, champ, slots=6) or {r: 1.0 / 6 for r in range(1, 7)}
+    P = sum(pools_nc.values())
+    score = {r: (1 - p.get(r, 1.0 / 6)) * FEE * P / max(pools_nc[r], 0.1) for r in rooms}
+    picks["smartev"] = max(rooms, key=lambda r: score[r])
+    return picks
+
+
+def sim_settle(game, pools, room, bet, killed=None, winner=None):
+    """虚拟下注结算(模拟盘/follow元策略/采集器滚动收益用; 各游戏近似公式,
+    实盘盈亏一律以官方 2008 allocation_amount 为准)"""
+    if game == "steal":
+        killed = killed or set()
+        if room in killed:
+            return -bet
+        total = sum(pools.values())
+        dead = sum(v for k, v in pools.items() if k in killed)
+        alive = total - dead
+        return bet + FEE * dead * bet / (alive + bet) - bet if dead > 0 else 0.0
+    if game == "cock":
+        return bet * (COCK_ODDS - 1) if room == winner else -bet
+    # fox 冠军盘
+    if room == winner:
+        P = sum(pools.values())
+        return bet * (FEE * P / max(pools.get(room, 0.0) + bet, 0.1) - 1) if P > 0 else 0.0
+    return -bet
+
+
+def sim_settle_nc(pools_nc, room, bet, winner):
+    """赛马非冠军盘虚拟结算: 目标狐没夺冠即赢"""
+    if room != winner:
+        P = sum(pools_nc.values())
+        return bet * (FEE * P / max(pools_nc.get(room, 0.0) + bet, 0.1) - 1) if P > 0 else 0.0
+    return -bet
+
+
 class Collector:
     """通用采集: live_state_<game>.json + rounds_<game>.jsonl
-    逃杀额外在 T-5s 做六策略统一决策(picks), 实盘引擎与模拟盘共用"""
+    各游戏在 T-5s 做统一决策(picks), 实盘引擎与模拟盘共用
+    赛马额外维护非冠军盘池子(pools_nc)与 picks_nc, 以及 2012 冠军统计"""
 
     SNAPSHOT_LEAD = 5.0  # T-5s 快照+统一决策(下注末期池子已基本定型)
 
@@ -209,6 +351,7 @@ class Collector:
         self.round_id = None
         self.status = None
         self.pools = {}
+        self.pools_nc = {}   # 赛马非冠军盘(bet_type=2)池子
         self.players = {}
         self.end_ms = 0
         self.winner = None
@@ -216,61 +359,56 @@ class Collector:
         self.last_killed = []
         self.events = []
         self.snapshot = None
+        self.snapshot_nc = None
         self.snap_taken = False
         self.picks = None
+        self.picks_nc = None
+        self.champ = {}      # 赛马 2012 历史冠军计数
         self.saved_rounds = set()
         self._settling = False
         self._handshake_fails = 0
         self._tok_idx = 0
-        self.kill_hist = []  # 最近50回合各房被杀计数(smartev多因子用)
+        self.kill_hist = []  # 逃杀: 最近50回合被杀计数(smartev多因子用)
+        self.win_hist = []   # 斗鸡/赛马: 最近20回合冠军
         self.strat_hist = {k: [] for k in
                            ("smartev", "minpool", "maxpool", "random", "room1", "maxplayers")}
-        self._load_kill_hist()
         self._load_strat_hist()
 
     def start(self):
         threading.Thread(target=self._run, daemon=True, name="collect-" + self.key).start()
 
     def _load_strat_hist(self):
-        """预热六策略近50盘盈亏(follow 元策略用)"""
-        if self.key != "steal":
-            return
+        """预热各基础策略近30盘盈亏(follow 元策略用), 按各游戏近似公式结算"""
         try:
-            lines = open(os.path.join(DATA, "rounds_steal.jsonl"), encoding="utf-8").readlines()[-60:]
-            for line in lines:
-                try:
-                    r = json.loads(line)
-                except json.JSONDecodeError:
+            lines = open(os.path.join(DATA, f"rounds_{self.key}.jsonl"), encoding="utf-8").readlines()[-60:]
+        except FileNotFoundError:
+            return
+        for line in lines:
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            picks = r.get("picks")
+            if not picks or not r.get("pools"):
+                continue
+            pools = {int(k): v for k, v in r["pools"].items() if v is not None}
+            if not pools:
+                continue
+            killed = set(r.get("killed") or [])
+            winner = r.get("winner")
+            if self.key != "steal" and winner is None:
+                continue
+            for sk, room in picks.items():
+                if sk == "roundId" or sk not in self.strat_hist:
                     continue
-                picks = r.get("picks")
-                if not picks or not r.get("killed") or not r.get("pools"):
+                if room not in pools:
                     continue
-                pools = {int(k): v for k, v in r["pools"].items()}
-                killed = set(r["killed"])
-                total = sum(pools.values())
-                dead = sum(v for k, v in pools.items() if k in killed)
-                alive = total - dead
-                for sk, room in picks.items():
-                    if sk == "roundId" or sk not in self.strat_hist:
-                        continue
-                    if room not in pools:
-                        continue
-                    if room in killed:
-                        p = -5.0
-                    else:
-                        p = 5.0 + FEE * dead * 5.0 / (alive + 5.0) - 5.0 if dead > 0 else 0.0
-                    self.strat_hist[sk].append(p)
+                self.strat_hist[sk].append(sim_settle(self.key, pools, room, 5.0,
+                                                      killed=killed, winner=winner))
             for sk in self.strat_hist:
                 del self.strat_hist[sk][:-30]
-        except FileNotFoundError:
-            pass
-
-    def _load_kill_hist(self):
-        """从历史存档预热近50回合被杀计数(重启不丢)"""
-        if self.key != "steal":
-            return
-        try:
-            lines = open(os.path.join(DATA, "rounds_steal.jsonl"), encoding="utf-8").readlines()[-60:]
+        # 逃杀额外预热被杀计数
+        if self.key == "steal":
             for line in lines:
                 try:
                     r = json.loads(line)
@@ -278,9 +416,16 @@ class Collector:
                     continue
                 for k in r.get("killed", []):
                     self.kill_hist.append(k)
-        except FileNotFoundError:
-            pass
-        del self.kill_hist[:-50]
+            del self.kill_hist[:-50]
+        else:
+            for line in lines:
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if r.get("winner") is not None:
+                    self.win_hist.append(r["winner"])
+            del self.win_hist[:-20]
 
     # ---- 连接循环 ----
     def _run(self):
@@ -410,21 +555,6 @@ class Collector:
             self.last_killed = d.get("killedRooms") or []
             self.kill_hist.extend(self.last_killed)
             del self.kill_hist[:-50]
-            # 六策略本回合盈亏入滚动窗口(follow 用)
-            if self.picks and self.snapshot:
-                pools = self.snapshot
-                total = sum(pools.values())
-                dead = sum(v for k, v in pools.items() if k in self.last_killed)
-                alive = total - dead
-                for sk, room in self.picks.items():
-                    if sk == "roundId" or sk not in self.strat_hist:
-                        continue
-                    if room in self.last_killed:
-                        p = -5.0
-                    else:
-                        p = 5.0 + FEE * dead * 5.0 / (alive + 5.0) - 5.0 if dead > 0 else 0.0
-                    self.strat_hist[sk].append(p)
-                    del self.strat_hist[sk][:-30]
             self.push("kill", f"回合 {d.get('roundId')} 结算: {self.last_killed} 号房被击杀")
             pools = self.snapshot if self.snapshot else self.pools
             self._save_round(pools, killed=self.last_killed)
@@ -441,6 +571,9 @@ class Collector:
     def _d_cock(self, evt, d):
         if evt == "2001":
             r = d.get("round") or {}
+            if r.get("round_id") != self.round_id:
+                self.snap_taken = False
+                self.picks = None
             self.round_id = r.get("round_id")
             self.status = r.get("status")
             self.pools = {it["item_id"]: it.get("total_amount", 0) for it in (d.get("items") or [])}
@@ -481,9 +614,14 @@ class Collector:
     def _d_fox(self, evt, d):
         if evt == "2001":
             r = d.get("round") or {}
+            if r.get("round_id") != self.round_id:
+                self.snap_taken = False
+                self.picks = None
+                self.picks_nc = None
             self.round_id = r.get("round_id")
             self.status = r.get("status")
-            self.end_ms = int(time.time() * 1000 + (r.get("room_countdown") or 0) * 1000)
+            if r.get("status") == 0 and r.get("room_countdown"):
+                self.end_ms = int(time.time() * 1000 + r["room_countdown"] * 1000)
             if r.get("win_item_id"):
                 self.winner = r.get("win_item_id")
         elif evt == "2011":
@@ -492,9 +630,17 @@ class Collector:
                 self.winner = rounds[0].get("win_item_id")
                 self.rank = rounds[0].get("race_rank_info")
                 if self._settling:
-                    self._save_round(self.pools, winner=self.winner, rank=self.rank)
+                    pools = getattr(self, "_final_pools", None) or self.pools
+                    pools_nc = getattr(self, "_final_nc", None) or self.pools_nc
+                    self._save_round(pools, winner=self.winner, rank=self.rank,
+                                     pools_nc=pools_nc)
                     self.push("kill", f"回合 {self.round_id} 冠军 {self.winner} 号狐")
                     self._settling = False
+                    self._final_pools = None
+                    self._final_nc = None
+        elif evt == "2012":
+            self.champ = {it.get("item_id"): it.get("champion_count", 0)
+                          for it in (d.get("items") or []) if it.get("item_id")}
         elif evt == "3002":
             self.push("round", f"回合 {d.get('round_id')} 状态变化")
             for e in self.cfg["refresh"]:
@@ -503,14 +649,22 @@ class Collector:
             iids = d.get("item_id") or []
             if isinstance(iids, int):
                 iids = [iids]
+            tgt = self.pools_nc if d.get("bet_type", 1) == 2 else self.pools
             for iid in iids:
-                self.pools[iid] = self.pools.get(iid, 0) + d.get("amount", 0)
-                self.players[iid] = self.players.get(iid, 0) + 1
-            self.push("bet", f"{d.get('nickname','?')} 押 {iids} 号狐 {d.get('amount')}")
+                tgt[iid] = tgt.get(iid, 0) + d.get("amount", 0)
+                if tgt is self.pools:
+                    self.players[iid] = self.players.get(iid, 0) + 1
+            self.push("bet", f"{d.get('nickname','?')} 押 {iids} 号狐 {d.get('amount')}"
+                              + ("(非冠军)" if d.get("bet_type", 1) == 2 else ""))
         elif evt == "3004":
             self.push("settle", f"回合 {d.get('round_id')} 比赛结束")
+            if self.pools:
+                self._final_pools = dict(self.pools)
+            if self.pools_nc:
+                self._final_nc = dict(self.pools_nc)
             self.pools = {}
             self.players = {}
+            self.pools_nc = {}
             self._settling = True
             for e in self.cfg["refresh"]:
                 self._send(e)
@@ -526,27 +680,53 @@ class Collector:
         rec = {"ts": int(time.time()), "game": self.key, "roundId": self.round_id,
                "pools": {int(k): round(v, 2) for k, v in pools.items()},
                "players": {int(k): v for k, v in self.players.items()},
-               "picks": self.picks if self.key == "steal" else None}
+               "picks": self.picks}
+        if self.key == "fox":
+            rec["picks_nc"] = self.picks_nc
         rec.update(extra)
         with open(os.path.join(DATA, f"rounds_{self.key}.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self.saved_rounds.add(self.round_id)
         if len(self.saved_rounds) > 300:
             self.saved_rounds = set(list(self.saved_rounds)[-150:])
+        # 冠军历史(斗鸡/赛马 smartev 用) + 各基础策略滚动收益(follow 元策略用)
+        winner = extra.get("winner")
+        if self.key != "steal" and winner is not None:
+            self.win_hist.append(winner)
+            del self.win_hist[:-20]
+        if self.picks and pools:
+            killed = set(extra.get("killed") or [])
+            for sk, room in self.picks.items():
+                if sk == "roundId" or sk not in self.strat_hist or room not in pools:
+                    continue
+                self.strat_hist[sk].append(sim_settle(self.key, pools, room, 5.0,
+                                                      killed=killed, winner=winner))
+                del self.strat_hist[sk][:-30]
 
     def tick(self):
-        if self.key != "steal" or self.status != 2 or not self.end_ms or self.snap_taken:
+        if self.status != self.cfg["bet_status"] or not self.end_ms or self.snap_taken:
             return
         remain = (self.end_ms - time.time() * 1000) / 1000
         if 0 < remain <= self.SNAPSHOT_LEAD:
             self.snapshot = dict(self.pools)
+            self.snapshot_nc = dict(self.pools_nc)
             self.snap_taken = True
-            # T-5s 统一决策: 六策略定房(所有引擎与模拟盘共用, 保证选房一致)
-            kc = {}
-            for k in self.kill_hist:
-                kc[k] = kc.get(k, 0) + 1
-            self.picks = compute_picks(self.snapshot, self.players, self.round_id,
-                                       kill_counts=kc, kill_window=len(self.kill_hist))
+            # T-5s 统一决策: 各游戏定房(所有引擎与模拟盘共用, 保证选房一致)
+            if self.key == "steal":
+                kc = {}
+                for k in self.kill_hist:
+                    kc[k] = kc.get(k, 0) + 1
+                self.picks = compute_picks("steal", self.snapshot, self.players, self.round_id,
+                                           kill_counts=kc, kill_window=len(self.kill_hist))
+            elif self.key == "cock":
+                self.picks = compute_picks("cock", self.snapshot, self.players, self.round_id,
+                                           win_hist=self.win_hist)
+            else:
+                self.picks = compute_picks("fox", self.snapshot, self.players, self.round_id,
+                                           win_hist=self.win_hist, champ=self.champ)
+                if self.snapshot_nc:
+                    self.picks_nc = compute_picks_nc(self.snapshot_nc, self.players, self.round_id,
+                                                     win_hist=self.win_hist, champ=self.champ)
             # follow 元策略: 跟随近30盘收益最高的基础策略(用截至上回合数据, 无前视)
             if any(self.strat_hist.values()):
                 best_sk = max(self.strat_hist, key=lambda k: sum(self.strat_hist[k]))
@@ -563,6 +743,10 @@ class Collector:
               "winner": self.winner, "rank": self.rank, "lastKilled": self.last_killed,
               "picks": self.picks,
               "events": self.events}
+        if self.key == "fox":
+            st["poolsNc"] = {str(k): round(v, 2) for k, v in self.pools_nc.items()}
+            st["picksNc"] = self.picks_nc
+            st["champ"] = {str(k): v for k, v in self.champ.items()}
         try:
             write_atomic(os.path.join(DATA, f"live_state_{self.key}.json"), st)
         except Exception:
@@ -578,27 +762,39 @@ def room_ev(pools, R):
 
 
 class BetEngine:
-    def __init__(self, user_id):
+    """每用户每游戏一个引擎。逃杀/斗鸡/赛马共用骨架:
+    - 逃杀: 3004 直接带官方派息(finalPayoutAmount)
+    - 斗鸡/赛马: 3004 后发 2008 查询本回合自己的结算(allocation_amount)
+    - 赛马分冠军盘(bet_type=1)/非冠军盘(bet_type=2), 按用户配置选玩法"""
+
+    def __init__(self, user_id, game="steal"):
         self.uid = user_id
-        self.log = logging.getLogger(f"bot-{user_id}")
+        self.game = game
+        self.cfg = GAMES[game]
+        self.log = logging.getLogger(f"bot-{game}-{user_id}")
         self.stop_flag = False
         self.connected = False
         self.round_id = None
         self.status = None
         self.end_ms = 0
         self.pools = {}
-        self.players = {}   # 房间 -> 人数 (maxplayers 策略用; 实测被杀偏向人少的房)
+        self.pools_nc = {}  # 赛马非冠军盘池子
+        self.players = {}   # 房间 -> 人数 (maxplayers 策略用)
+        self.winner = None
         self.bet_rounds = set()
         self.pending = {}
         self.ws = None
         self.clock_off = 0    # 游戏服务器时间 - 本机时间 (ms)
+        self.lulu_uid = 0     # 游戏账号 userid(斗鸡下注要带)
+        self.settle_rid = None  # 斗鸡/赛马: 等待 2008 结算明细的回合
         # 下注提前量(秒): 持久化在 bot_state.bet_lead, 重启不丢学到的值
         try:
-            self.lead = float(get_bot(user_id)["bet_lead"] or 3.0)
+            self.lead = float(get_bot(user_id, game)["bet_lead"] or 3.0)
         except Exception:
             self.lead = 3.0
         self.hell_block = False  # 地狱模式时段禁注
-        self.tiers = [10.0, 1.0, 0.1]  # 官方档位(实测 0.1/1 可用, 10 未证但同族), 被拒自动降档
+        # 官方档位: 逃杀实测 {0.1,1,10}; 斗鸡/赛马 UI 含 100 档, 被拒自动降档
+        self.tiers = [10.0, 1.0, 0.1] if game == "steal" else [100.0, 10.0, 1.0, 0.1]
 
     @staticmethod
     def compose(amount, tiers):
@@ -614,8 +810,8 @@ class BetEngine:
         return parts if rem <= 1e-6 else None
 
     def start(self):
-        threading.Thread(target=self._run, daemon=True, name=f"bet-{self.uid}").start()
-        threading.Thread(target=self._ticker, daemon=True, name=f"bet-tick-{self.uid}").start()
+        threading.Thread(target=self._run, daemon=True, name=f"bet-{self.game}-{self.uid}").start()
+        threading.Thread(target=self._ticker, daemon=True, name=f"bet-tick-{self.game}-{self.uid}").start()
 
     def _ticker(self):
         """独立心跳: 每0.5s检查下注窗口(不依赖消息推送触发)"""
@@ -630,12 +826,12 @@ class BetEngine:
             time.sleep(0.5)
 
     def stop(self, reason):
-        set_bot(self.uid, enabled=0, stop_reason=reason)
+        set_bot(self.uid, self.game, enabled=0, stop_reason=reason)
         self.stop_flag = True
         self.log.warning("停止: %s", reason)
 
     def _run(self):
-        anchor_dns(STEAL["host"])
+        anchor_dns(self.cfg["host"])
         backoff = 5
         while not self.stop_flag:
             u = get_user(self.uid)
@@ -644,7 +840,8 @@ class BetEngine:
             if not tok or not uid:
                 self.stop("缺少游戏 token，请先在设置里登录")
                 return
-            url = f"{STEAL['url']}?token={tok}&userid={uid}"
+            self.lulu_uid = int(uid)
+            url = f"{self.cfg['url']}?token={tok}&userid={uid}"
             self.ws = websocket.WebSocketApp(
                 url, on_open=self._on_open, on_message=self._on_message,
                 on_error=lambda ws, e: self.log.error("WS: %s", str(e)[:80]),
@@ -668,7 +865,8 @@ class BetEngine:
     def _on_open(self, ws):
         self.connected = True
         self.log.info("已连接")
-        self._send("2001")
+        for e in self.cfg["init"]:
+            self._send(e)
 
     def _on_message(self, ws, message):
         for part in message.split("&"):
@@ -703,6 +901,18 @@ class BetEngine:
             if d.get("time"):
                 self.clock_off = int(d["time"]) - int(time.time() * 1000)
             return
+        if evt == "2002":  # 下注响应（每笔一个）
+            self._resp_bet(obj)
+            return
+        if self.game == "steal":
+            self._ev_steal(evt, d)
+        elif self.game == "cock":
+            self._ev_cock(evt, d)
+        else:
+            self._ev_fox(evt, d)
+
+    # ---- 逃杀事件 ----
+    def _ev_steal(self, evt, d):
         if evt == "2001":
             r = d.get("result") or {}
             self.round_id = r.get("roundId")
@@ -718,32 +928,6 @@ class BetEngine:
             self.pools[d["roomId"]] = d.get("totalAmount", 0)
             if d.get("playerCount") is not None:
                 self.players[d["roomId"]] = d["playerCount"]
-        elif evt == "2002":  # 下注响应（每笔一个）
-            p = self.pending.get(self.round_id)
-            if not p:
-                pass
-            elif obj.get("code") == 0:
-                p["sent"].append(p["queue"].pop(0) if p["queue"] else 0)
-                self._flush_queue(p)
-            else:
-                msg = obj.get("msg", "?")
-                amt = p["queue"].pop(0) if p["queue"] else 0
-                self.log.warning("下注被拒(%.1f): %s", amt, msg)
-                if "无效" in msg and amt in self.tiers:
-                    self.tiers.remove(amt)  # 档位无效 -> 降档重组剩余
-                    self.log.info("移除无效档位 %.1f, 剩余档位 %s", amt, self.tiers)
-                    rest = self.compose(round(sum(p["queue"]) + 1e-9, 2), self.tiers)
-                    p["queue"] = rest if rest else []
-                elif "锁定" in msg:
-                    self.lead = min(8.0, self.lead + 1.0)
-                    set_bot(self.uid, bet_lead=self.lead)
-                    p["queue"] = []  # 锁定, 本回合放弃剩余
-                    self.log.info("提前量自适应 -> %.1fs (已持久化)", self.lead)
-                elif "余额" in msg or "不足" in msg or "token" in msg.lower():
-                    p["queue"] = []
-                    if not p["sent"]:
-                        self.stop(f"下注被拒({msg})")
-                self._flush_queue(p)
         elif evt == "3004":
             rid = d.get("roundId")
             p = self.pending.pop(rid, None)
@@ -754,26 +938,170 @@ class BetEngine:
                 status = ("赢" if d.get("isWinner") == 1 else "输") if staked else "未成交"
                 if staked and abs(staked - p["amount"]) > 1e-6:
                     status += f"(部分{staked}/{p['amount']})"
-                add_bet(self.uid, rid, p["room"], staked, status, round(pnl, 4))
-                bs = get_bot(self.uid)
+                add_bet(self.uid, self.game, rid, p["room"], staked, status, round(pnl, 4))
+                bs = get_bot(self.uid, self.game)
                 newpnl = (bs["pnl"] or 0) + pnl
-                set_bot(self.uid, pnl=round(newpnl, 4))
+                set_bot(self.uid, self.game, pnl=round(newpnl, 4))
                 # 止盈止损按游戏官方口径(含手动下注), 查询失败则跳过本次检查
                 gd = gamestat_cached(self.uid)
                 tp = gd.get("net") if gd.get("code") == 0 else None
                 self.log.info("回合%s %s pnl=%+.3f 累计(自算)%+.3f 今日(官方)%s", rid, status, pnl, newpnl,
                               f"{tp:+.3f}" if tp is not None else "?")
-                if tp is not None and tp <= -abs(bs["max_loss"]):
-                    self.stop(f"触发今日亏损上限 {bs['max_loss']}（官方今日 {tp:.2f}）已自动暂停，次日手动开启")
-                elif tp is not None and tp >= float(bs["take_profit"] or 5.0):
-                    self.stop(f"触发今日止盈 {bs['take_profit']}（官方今日 {tp:+.2f}）已自动暂停，次日手动开启")
+                self._check_stop(bs, tp)
             self._send("2001")
 
-    def _unified_pick(self, strategy):
-        """读采集器发布的统一决策(live_state_steal.json 的 picks), 匹配当前回合才用"""
+    # ---- 斗鸡事件 ----
+    def _ev_cock(self, evt, d):
+        if evt == "2001":
+            r = d.get("round") or {}
+            self.round_id = r.get("round_id")
+            self.status = r.get("status")
+            self.pools = {it["item_id"]: it.get("total_amount", 0) for it in (d.get("items") or [])}
+            self.players = {it["item_id"]: it.get("num", 0) for it in (d.get("item_player_num") or [])}
+            st = r.get("stop_time")
+            if st:
+                try:
+                    self.end_ms = int(time.mktime(time.strptime(st, "%Y-%m-%d %H:%M:%S")) - time.timezone) * 1000
+                except Exception:
+                    pass
+        elif evt == "3002":
+            self._send("2001")
+        elif evt == "3003":
+            iid = d.get("item_id")
+            if iid:
+                self.pools[iid] = self.pools.get(iid, 0) + d.get("amount", 0)
+                self.players[iid] = self.players.get(iid, 0) + 1
+        elif evt == "3004":
+            rid = d.get("round_id")
+            if rid in self.pending:
+                self.settle_rid = rid
+                self._send("2008", {"round_id": rid})
+            self._send("2001")
+        elif evt == "2008":
+            self._settle_cock_2008(d)
+
+    def _settle_cock_2008(self, d):
+        rid = self.settle_rid
+        p = self.pending.get(rid)
+        if rid is None or not p:
+            return
+        r = d.get("round") or {}
+        ui = d.get("user_item") or {}
+        staked = round(float(ui.get("amount") or 0), 4)
+        alloc = float(ui.get("allocation_amount") or 0)
+        won = bool(r.get("win_item_id")) and ui.get("item_id") == r.get("win_item_id")
+        self._settle_official(rid, p, staked, alloc, won)
+
+    # ---- 赛马事件 ----
+    def _ev_fox(self, evt, d):
+        if evt == "2001":
+            r = d.get("round") or {}
+            self.round_id = r.get("round_id")
+            self.status = r.get("status")
+            if r.get("status") == 0 and r.get("room_countdown"):
+                self.end_ms = int(time.time() * 1000 + r["room_countdown"] * 1000)
+        elif evt == "3002":
+            for e in self.cfg["refresh"]:
+                self._send(e)
+        elif evt == "3003":
+            iids = d.get("item_id") or []
+            if isinstance(iids, int):
+                iids = [iids]
+            tgt = self.pools_nc if d.get("bet_type", 1) == 2 else self.pools
+            for iid in iids:
+                tgt[iid] = tgt.get(iid, 0) + d.get("amount", 0)
+        elif evt == "3004":
+            rid = d.get("round_id")
+            if rid in self.pending:
+                self.settle_rid = rid
+                self._send("2008", {"round_id": rid})
+            for e in self.cfg["refresh"]:
+                self._send(e)
+        elif evt == "2008":
+            self._settle_fox_2008(d)
+
+    def _settle_fox_2008(self, d):
+        rid = self.settle_rid
+        p = self.pending.get(rid)
+        if rid is None or not p:
+            return
+        r = d.get("round") or {}
+        winner = r.get("win_item_id")
+        bt = int(p.get("bet_type") or 1)
+        mine = [ui for ui in (d.get("user_items") or [])
+                if int(ui.get("bet_type") or 0) == bt and float(ui.get("amount") or 0) > 0]
+        staked = round(sum(float(ui.get("amount") or 0) for ui in mine), 4)
+        alloc = sum(float(ui.get("allocation_amount") or 0) for ui in mine)
+        if bt == 2:  # 非冠军盘: 押的狐没夺冠才算赢
+            won = bool(mine) and all(int(ui.get("item_id")) != winner for ui in mine)
+        else:
+            won = bool(mine) and any(int(ui.get("item_id")) == winner for ui in mine)
+        self._settle_official(rid, p, staked, alloc, won,
+                              tag="(非冠军盘)" if bt == 2 else "(冠军盘)")
+
+    # ---- 斗鸡/赛马公共结算(官方 allocation_amount 口径) ----
+    def _settle_official(self, rid, p, staked, alloc, won, tag=""):
+        self.pending.pop(rid, None)
+        self.settle_rid = None
+        pnl = alloc - staked if staked else 0.0
+        status = ("赢" if won else "输") if staked else "未成交"
+        if staked and abs(staked - p["amount"]) > 1e-6:
+            status += f"(部分{staked}/{p['amount']})"
+        add_bet(self.uid, self.game, rid, p["room"], staked, status + tag, round(pnl, 4))
+        bs = get_bot(self.uid, self.game)
+        newpnl = (bs["pnl"] or 0) + pnl
+        set_bot(self.uid, self.game, pnl=round(newpnl, 4))
+        # 止盈止损: 斗鸡/赛马按本面板该游戏 bet_log 自算(官方每日接口口径未覆盖这两游戏)
+        tp = bet_log_today(self.uid, self.game)
+        self.log.info("回合%s %s%s 官方分配%.3f pnl=%+.3f 累计(自算)%+.3f 今日(本游戏)%+.3f",
+                      rid, status, tag, alloc, pnl, newpnl, tp)
+        self._check_stop(bs, tp)
+
+    def _check_stop(self, bs, tp):
+        if tp is None:
+            return
+        if tp <= -abs(bs["max_loss"]):
+            self.stop(f"触发今日亏损上限 {bs['max_loss']}（今日 {tp:.2f}）已自动暂停，次日手动开启")
+        elif tp >= float(bs["take_profit"] or 5.0):
+            self.stop(f"触发今日止盈 {bs['take_profit']}（今日 {tp:+.2f}）已自动暂停，次日手动开启")
+
+    # ---- 下注响应 ----
+    def _resp_bet(self, obj):
+        d = obj.get("d") or {}
+        rid = d.get("round_id", self.round_id)
+        p = self.pending.get(rid)
+        if not p:
+            return
+        if obj.get("code") == 0:
+            p["sent"].append(p["queue"].pop(0) if p["queue"] else 0)
+            self._flush_queue(p)
+            return
+        msg = obj.get("msg", "?")
+        amt = p["queue"].pop(0) if p["queue"] else 0
+        self.log.warning("下注被拒(%.1f): %s", amt, msg)
+        if "无效" in msg and amt in self.tiers:
+            self.tiers.remove(amt)  # 档位无效 -> 降档重组剩余
+            self.log.info("移除无效档位 %.1f, 剩余档位 %s", amt, self.tiers)
+            rest = self.compose(round(sum(p["queue"]) + 1e-9, 2), self.tiers)
+            p["queue"] = rest if rest else []
+        elif "锁定" in msg or "封盘" in msg or "结束" in msg or "上限" in msg:
+            if "锁定" in msg:
+                self.lead = min(8.0, self.lead + 1.0)
+                set_bot(self.uid, self.game, bet_lead=self.lead)
+                self.log.info("提前量自适应 -> %.1fs (已持久化)", self.lead)
+            p["queue"] = []  # 本回合放弃剩余
+        elif "余额" in msg or "不足" in msg or "token" in msg.lower():
+            p["queue"] = []
+            if not p["sent"]:
+                self.stop(f"下注被拒({msg})")
+        self._flush_queue(p)
+
+    def _unified_pick(self, strategy, bet_type=1):
+        """读采集器发布的统一决策(live_state_<game>.json 的 picks), 匹配当前回合才用"""
         try:
-            with open(os.path.join(DATA, "live_state_steal.json"), encoding="utf-8") as f:
-                picks = json.load(f).get("picks")
+            with open(os.path.join(DATA, f"live_state_{self.game}.json"), encoding="utf-8") as f:
+                st = json.load(f)
+            picks = st.get("picksNc") if (self.game == "fox" and bet_type == 2) else st.get("picks")
             if picks and picks.get("roundId") == self.round_id:
                 return picks.get(strategy)
         except Exception:
@@ -783,13 +1111,17 @@ class BetEngine:
     def maybe_bet(self):
         if self.stop_flag:
             return
-        self.hell_block = in_hell()  # 游戏时间 19:55~22:00 地狱模式, 禁止下注
+        self.hell_block = in_hell()  # 游戏时间 19:55~21:05 地狱模式, 禁止下注
         if self.hell_block:
             return
-        bs = get_bot(self.uid)
+        bs = get_bot(self.uid, self.game)
         if not bs["enabled"]:
             return
-        if self.status != 2 or not self.end_ms or not self.pools:
+        if self.status != self.cfg["bet_status"] or not self.end_ms or not self.pools:
+            return
+        bt = int(bs["fox_bet_type"] or 1) if self.game == "fox" else 1
+        pools = self.pools_nc if (self.game == "fox" and bt == 2) else self.pools
+        if not pools:
             return
         # 用游戏服务器校准后的时间算剩余
         remain = (self.end_ms - (time.time() * 1000 + self.clock_off)) / 1000
@@ -799,35 +1131,40 @@ class BetEngine:
             return
         amt = float(bs["amount"])
         st = bs["strategy"]
+        if st == "follow" and self.game == "fox" and bt == 2:
+            st = "smartev"  # 非冠军盘不提供 follow
         # 优先使用采集器 T-5s 的统一决策(与模拟盘完全一致)
-        room = self._unified_pick(st)
+        room = self._unified_pick(st, bt)
         if room:
             pass
         elif st == "minpool":
-            room = min(self.pools, key=lambda r: self.pools[r])
+            room = min(pools, key=lambda r: pools[r])
         elif st == "maxpool":
-            room = max(self.pools, key=lambda r: self.pools[r])
+            room = max(pools, key=lambda r: pools[r])
         elif st == "random":
-            room = random.choice(list(self.pools.keys()))
-        elif st == "room1":  # 固定押1号房: 全天被杀率最低(7.6% vs 基线12.5%)
-            if 1 not in self.pools:
+            room = random.choice(list(pools.keys()))
+        elif st == "room1":  # 固定押1号
+            if 1 not in pools:
                 return
             room = 1
-        elif st == "maxplayers":  # 押人最多房: 击杀算法偏向杀人少的房
-            room = max(self.pools, key=lambda r: (self.players.get(r, 0), -self.pools[r]))
-        else:
-            room = max(self.pools, key=lambda r: room_ev(self.pools, r))
+        elif st == "maxplayers":  # 押人最多
+            room = max(pools, key=lambda r: (self.players.get(r, 0), -pools[r]))
+        elif self.game == "cock":  # smartev 本地兜底: 押池占比高的队
+            total = sum(pools.values()) or 1.0
+            room = max(pools, key=lambda r: pools[r] / total)
+        else:  # steal/fox smartev 本地兜底
+            room = max(pools, key=lambda r: room_ev(pools, r) if self.game == "steal" else pools[r])
         self.bet_rounds.add(self.round_id)
-        # 档位组合: 官方只认 {0.1,1,10}, 任意 0.1 倍数金额自动组合 (0.3->0.1x3, 2->1x2)
+        # 档位组合: 官方只认固定档位, 任意 0.1 倍数金额自动组合 (0.3->0.1x3, 2->1x2)
         queue = self.compose(amt, self.tiers)
         if not queue or len(queue) > 60:
             self.log.warning("金额 %s 无法组合或笔数过多, 跳过", amt)
             return
         self.pending[self.round_id] = {"roundId": self.round_id, "room": room,
                                        "amount": amt, "queue": queue, "sent": [],
-                                       "flushing": False}
-        self.log.info("[下注] 回合%s 房间%s 总额%s 组合%s 剩余%.1fs",
-                      self.round_id, room, amt, queue, remain)
+                                       "flushing": False, "bet_type": bt}
+        self.log.info("[下注] %s 回合%s 目标%s 总额%s 组合%s 剩余%.1fs",
+                      self.game, self.round_id, room, amt, queue, remain)
         self._flush_queue(self.pending[self.round_id])
 
     def _flush_queue(self, p):
@@ -836,7 +1173,15 @@ class BetEngine:
             return
         p["flushing"] = True
         amt = p["queue"][0]
-        self._send("2002", {"roomId": p["room"], "amount": amt, "item_type": ITEM_ID})
+        if self.game == "steal":
+            payload = {"roomId": p["room"], "amount": amt, "item_type": ITEM_ID}
+        elif self.game == "cock":
+            payload = {"round_id": p["roundId"], "item_id": p["room"],
+                       "item_type": ITEM_ID, "user_id": self.lulu_uid, "amount": amt}
+        else:  # fox: item_id 是列表, amount 为每只金额(引擎只押一只)
+            payload = {"round_id": p["roundId"], "item_id": [p["room"]],
+                       "bet_type": int(p.get("bet_type") or 1), "amount": amt}
+        self._send("2002", payload)
         p["flushing"] = False
 
 
@@ -1016,13 +1361,13 @@ engines = {}
 engines_lock = threading.Lock()
 
 
-def engine_for(uid):
+def engine_for(uid, game="steal"):
     with engines_lock:
-        e = engines.get(uid)
+        e = engines.get((uid, game))
         if e and not e.stop_flag and e.ws:
             return e
-        e = BetEngine(uid)
-        engines[uid] = e
+        e = BetEngine(uid, game)
+        engines[(uid, game)] = e
         return e
 
 
@@ -1071,7 +1416,7 @@ def auth_register():
         return jsonify({"code": -1, "msg": "用户名已存在"})
     uid = db().execute("SELECT id FROM users WHERE username=?", (name,)).fetchone()[0]
     with db() as c:
-        c.execute("INSERT OR IGNORE INTO bot_state(user_id) VALUES(?)", (uid,))
+        c.execute("INSERT OR IGNORE INTO bot_state(user_id, game) VALUES(?, 'steal')", (uid,))
     session["uid"] = uid
     session.permanent = True
     return jsonify({"code": 0, "username": name})
@@ -1458,11 +1803,17 @@ def api_balance():
 # ---- 自动下注 ----
 @app.route("/api/bot/sim")
 def api_bot_sim():
-    """策略模拟盘: 最近N回合对6策略做虚拟下注(不真实下注), 返回汇总+逐回合明细"""
+    """策略模拟盘: 最近N回合对各策略做虚拟下注(不真实下注), 返回汇总+逐回合明细
+    game=steal|cock|fox; 赛马 mode=1(冠军盘)|2(非冠军盘)"""
+    game = request.args.get("game", "steal")
+    if game not in GAMES:
+        return jsonify({"error": "bad game"})
+    mode = request.args.get("mode", "1")
+    nc = (game == "fox" and mode == "2")
     N = 50
     rounds = []
     try:
-        lines = open(os.path.join(DATA, "rounds_steal.jsonl"), encoding="utf-8").readlines()
+        lines = open(os.path.join(DATA, f"rounds_{game}.jsonl"), encoding="utf-8").readlines()
     except FileNotFoundError:
         return jsonify({"error": "no data"})
     seen = set()
@@ -1471,15 +1822,20 @@ def api_bot_sim():
             r = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if r["roundId"] in seen or not r.get("pools") or not r.get("killed"):
+        picks = r.get("picks_nc") if nc else r.get("picks")
+        if r["roundId"] in seen or not r.get("pools") or not picks:
             continue
-        if not r.get("picks"):  # 只统计有统一决策记录的回合(与实盘完全同源)
+        if game == "steal" and not r.get("killed"):
+            continue
+        if game != "steal" and r.get("winner") is None:
             continue
         seen.add(r["roundId"])
         pools = {int(k): v for k, v in r["pools"].items() if v is not None}
-        players = {int(k): v for k, v in (r.get("players") or {}).items()}
-        if len(pools) >= 4:
-            rounds.append((r["roundId"], pools, set(r["killed"]), r["picks"]))
+        if nc:
+            pools = {int(k): v for k, v in (r.get("pools_nc") or {}).items() if v is not None}
+        if pools:
+            rounds.append((r["roundId"], pools, set(r.get("killed") or []),
+                           r.get("winner"), picks))
         if len(rounds) >= N:
             break
     rounds.sort(key=lambda x: x[0])  # 时间正序
@@ -1487,31 +1843,29 @@ def api_bot_sim():
         return jsonify({"error": "no data"})
 
     defs = [
-        ("smartev", "smartEV(结构期望最高)"),
+        ("smartev", "smartEV(智能优选)"),
         ("minpool", "minpool(押最小池)"),
         ("maxpool", "maxpool(押最大池)"),
         ("random", "random(随机)"),
-        ("room1", "room1(固定1号房)"),
+        ("room1", "room1(固定1号)"),
         ("maxplayers", "maxplayers(押人最多)"),
-        ("follow", "follow(跟随近30盘最优)"),
     ]
+    if not nc:  # 非冠军盘不提供 follow(依赖各基础策略滚动收益)
+        defs.append(("follow", "follow(跟随近30盘最优)"))
     out = []
     BET = 5.0
     for key, name in defs:
         pnl_total = 0.0
         wins = 0
         detail = []
-        for rid, pools, killed, picks in rounds:
+        for rid, pools, killed, winner, picks in rounds:
             room = picks.get(key)
             if room not in pools:
                 continue
-            total = sum(pools.values())
-            dead = sum(v for k, v in pools.items() if k in killed)
-            alive = total - dead
-            if room in killed:
-                p = -BET
+            if nc:
+                p = sim_settle_nc(pools, room, BET, winner)
             else:
-                p = BET + FEE * dead * BET / (alive + BET) - BET if dead > 0 else 0.0
+                p = sim_settle(game, pools, room, BET, killed=killed, winner=winner)
             pnl_total += p
             wins += 1 if p > 0 else 0
             detail.append({"roundId": rid, "room": room, "win": p > 0,
@@ -1522,7 +1876,8 @@ def api_bot_sim():
                     "roi": round(pnl_total / (n_bets * BET), 4) if n_bets else 0,
                     "bets": n_bets, "detail": detail[-50:][::-1]})  # 最近50回合, 新的在前
     out.sort(key=lambda s: -s["pnl"])
-    return jsonify({"rounds": len(rounds), "latestRound": rounds[-1][0], "strats": out})
+    return jsonify({"game": game, "mode": 2 if nc else 1, "rounds": len(rounds),
+                    "latestRound": rounds[-1][0], "strats": out})
 
 
 _gamestat_cache = {}
@@ -1590,9 +1945,12 @@ def api_bot_config():
     u = me()
     if not u:
         return jsonify({"code": -1, "msg": "请先登录"})
+    game = request.values.get("game", "steal")
+    if game not in GAMES:
+        return jsonify({"code": -1, "msg": "未知游戏"})
     if request.method == "POST":
         j = request.json or {}
-        bs = get_bot(u["id"])
+        bs = get_bot(u["id"], game)
         if j.get("enabled"):
             if not u["lulu_token"]:
                 return jsonify({"code": -1, "msg": "请先登录游戏获取 token"})
@@ -1601,20 +1959,25 @@ def api_bot_config():
                 return jsonify({"code": -1, "msg": "金额需为 0.1 的倍数且不低于 0.1（如 0.3 会自动拆成 0.1×3）"})
             if float(j.get("max_loss", 0)) <= 0:
                 return jsonify({"code": -1, "msg": "必须设置亏损上限"})
-        set_bot(u["id"],
+        set_bot(u["id"], game,
                 enabled=1 if j.get("enabled") else 0,
                 strategy=j.get("strategy", bs["strategy"]),
                 amount=max(0.1, float(j.get("amount", bs["amount"]))),
                 max_loss=max(0.1, float(j.get("max_loss", bs["max_loss"]))),
                 take_profit=max(0.1, float(j.get("take_profit", bs["take_profit"] or 5.0))),
                 stop_reason="")
+        if game == "fox":
+            set_bot(u["id"], "fox", fox_bet_type=2 if int(j.get("fox_bet_type", 1) or 1) == 2 else 1)
         if j.get("enabled"):
-            engine_for(u["id"]).start()
+            engine_for(u["id"], game).start()
         return jsonify({"code": 0})
-    bs = get_bot(u["id"])
-    return jsonify({"strategy": bs["strategy"], "amount": bs["amount"],
-                    "max_loss": bs["max_loss"], "take_profit": bs["take_profit"] or 5.0,
-                    "enabled": bool(bs["enabled"])})
+    bs = get_bot(u["id"], game)
+    out = {"game": game, "strategy": bs["strategy"], "amount": bs["amount"],
+           "max_loss": bs["max_loss"], "take_profit": bs["take_profit"] or 5.0,
+           "enabled": bool(bs["enabled"])}
+    if game == "fox":
+        out["foxBetType"] = int(bs["fox_bet_type"] or 1)
+    return jsonify(out)
 
 
 @app.route("/api/bot/status")
@@ -1622,25 +1985,32 @@ def api_bot_status():
     u = me()
     if not u:
         return jsonify({"code": -1})
-    bs = get_bot(u["id"])
+    game = request.args.get("game", "steal")
+    if game not in GAMES:
+        return jsonify({"code": -1, "msg": "未知游戏"})
+    bs = get_bot(u["id"], game)
     with db() as c:
         bets = [{"time": r["ts"], "roundId": r["round_id"], "room": r["room"],
                  "amount": r["amount"], "status": r["status"], "pnl": r["pnl"]}
                 for r in c.execute(
-                    "SELECT ts,round_id,room,amount,status,pnl FROM bet_log WHERE user_id=? ORDER BY id DESC LIMIT 10",
-                    (u["id"],)).fetchall()]
-    e = engines.get(u["id"])
+                    "SELECT ts,round_id,room,amount,status,pnl FROM bet_log "
+                    "WHERE user_id=? AND game=? ORDER BY id DESC LIMIT 10",
+                    (u["id"], game)).fetchall()]
+    e = engines.get((u["id"], game))
     today = game_now().date().isoformat()
     with db() as c:
-        tp = c.execute("SELECT COALESCE(SUM(pnl),0) FROM bet_log WHERE user_id=? AND day=?",
-                       (u["id"], today)).fetchone()[0]
-    return jsonify({"enabled": bool(bs["enabled"]), "connected": bool(e and e.connected),
-                    "stopReason": bs["stop_reason"] or "",
-                    "hellBlock": bool(e and getattr(e, "hell_block", False)),
-                    "pnl": bs["pnl"], "todayPnl": round(tp, 4),
-                    "strategy": bs["strategy"], "amount": bs["amount"],
-                    "maxLoss": bs["max_loss"], "takeProfit": bs["take_profit"] or 5.0,
-                    "bets": bets})
+        tp = c.execute("SELECT COALESCE(SUM(pnl),0) FROM bet_log WHERE user_id=? AND game=? AND day=?",
+                       (u["id"], game, today)).fetchone()[0]
+    out = {"game": game, "enabled": bool(bs["enabled"]), "connected": bool(e and e.connected),
+           "stopReason": bs["stop_reason"] or "",
+           "hellBlock": bool(e and getattr(e, "hell_block", False)),
+           "pnl": bs["pnl"], "todayPnl": round(tp, 4),
+           "strategy": bs["strategy"], "amount": bs["amount"],
+           "maxLoss": bs["max_loss"], "takeProfit": bs["take_profit"] or 5.0,
+           "bets": bets}
+    if game == "fox":
+        out["foxBetType"] = int(bs["fox_bet_type"] or 1)
+    return jsonify(out)
 
 
 @app.route("/api/harvest/config", methods=["GET", "POST"])
@@ -1686,13 +2056,11 @@ if __name__ == "__main__":
         time.sleep(1)
     # 策略分析后台预计算
     threading.Thread(target=_strat_refresher, daemon=True).start()
-    # 策略分析后台预计算
-    threading.Thread(target=_strat_refresher, daemon=True).start()
-    # 恢复已开启的引擎
+    # 恢复已开启的引擎（每用户每游戏）
     with db() as c:
-        for r in c.execute("SELECT user_id FROM bot_state WHERE enabled=1").fetchall():
-            engine_for(r["user_id"]).start()
-        for r in c.execute("SELECT user_id FROM bot_state WHERE harvest_enabled=1").fetchall():
+        for r in c.execute("SELECT user_id, game FROM bot_state WHERE enabled=1").fetchall():
+            engine_for(r["user_id"], r["game"]).start()
+        for r in c.execute("SELECT DISTINCT user_id FROM bot_state WHERE harvest_enabled=1").fetchall():
             harvest_for(r["user_id"])
     from waitress import serve
     port = int(os.environ.get("LULU_PORT", "18080"))
