@@ -1,0 +1,9 @@
+# 运行数据(用户数据库/回合记录/密钥)
+data/
+# 凭证
+token.txt
+userid.txt
+# 临时
+__pycache__/
+*.pyc
+captures/

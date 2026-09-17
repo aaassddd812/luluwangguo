@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>露露娱乐 · 登录</title>
+<style>
+  :root { --bg:#f5f7fa; --card:#fff; --line:#e5e9f0; --txt:#24292f; --sub:#57606a; --blue:#0969da; --red:#cf222e; }
+  * { box-sizing:border-box; }
+  body { background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); margin:0; min-height:100vh;
+         display:flex; align-items:center; justify-content:center;
+         font-family:"Microsoft YaHei",sans-serif; }
+  .box { background:var(--card); border-radius:14px; padding:36px 40px; width:380px;
+         box-shadow:0 20px 60px rgba(0,0,0,.3); }
+  h1 { margin:0 0 4px; font-size:22px; color:var(--txt); }
+  .sub { color:var(--sub); font-size:13px; margin-bottom:24px; }
+  .frm { margin-bottom:14px; }
+  .frm label { display:block; font-size:13px; color:var(--sub); margin-bottom:5px; }
+  .frm input { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px;
+               font-size:15px; outline:none; }
+  .frm input:focus { border-color:var(--blue); }
+  .btn { width:100%; padding:11px; border:none; border-radius:8px; background:var(--blue);
+         color:#fff; font-size:15px; cursor:pointer; margin-top:6px; }
+  .btn:disabled { opacity:.6; }
+  .msg { font-size:13px; margin-top:10px; min-height:18px; }
+  .msg.err { color:var(--red); } .msg.ok { color:#1a7f37; }
+  .switch { text-align:center; margin-top:14px; font-size:13px; color:var(--sub); }
+  .switch a { color:var(--blue); cursor:pointer; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>🎮 露露娱乐面板</h1>
+  <div class="sub">星海逃杀 · 斗鸡 · 赛马 实时数据与自动下注</div>
+  <div class="frm"><label>用户名</label><input id="f-user" autocomplete="username"></div>
+  <div class="frm"><label>密码</label><input id="f-pass" type="password" autocomplete="current-password"></div>
+  <button class="btn" id="btn-go" onclick="go()">登 录</button>
+  <div class="msg" id="msg"></div>
+  <div class="switch">还没有账号？<a onclick="toggle()">注册一个</a></div>
+</div>
+<script>
+let mode = 'login';
+function toggle(){
+  mode = mode==='login' ? 'register' : 'login';
+  document.getElementById('btn-go').textContent = mode==='login' ? '登 录' : '注 册';
+  document.querySelector('.switch').innerHTML = mode==='login'
+    ? '还没有账号？<a onclick="toggle()">注册一个</a>' : '已有账号？<a onclick="toggle()">去登录</a>';
+  document.getElementById('msg').textContent = '';
+}
+async function go(){
+  const username = document.getElementById('f-user').value.trim();
+  const password = document.getElementById('f-pass').value;
+  const msg = document.getElementById('msg');
+  msg.className = 'msg';
+  msg.textContent = '请稍候…';
+  try {
+    const r = await fetch('/api/auth/' + mode, {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username, password})});
+    const d = await r.json();
+    if (d.code === 0) {
+      msg.className = 'msg ok';
+      msg.textContent = '✅ 成功，正在进入…';
+      location.reload();
+    } else {
+      msg.className = 'msg err';
+      msg.textContent = '❌ ' + (d.msg || '失败');
+    }
+  } catch(e) {
+    msg.className = 'msg err';
+    msg.textContent = '网络错误';
+  }
+}
+document.getElementById('f-pass').addEventListener('keydown', e => { if(e.key==='Enter') go(); });
+</script>
+</body>
+</html>

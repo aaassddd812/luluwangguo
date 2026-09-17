@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>露露王国 · 娱乐模块</title>
+<script src="https://cdn.bootcdn.net/ajax/libs/echarts/5.4.3/echarts.min.js"></script>
+<style>
+  :root { --bg:#f5f7fa; --card:#ffffff; --line:#e5e9f0; --txt:#24292f; --sub:#57606a;
+          --blue:#0969da; --red:#cf222e; --green:#1a7f37; --amber:#9a6700; --gold:#bf8700; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--txt); font-family:"Microsoft YaHei",sans-serif; margin:0; }
+  .topbar { background:var(--card); border-bottom:1px solid var(--line); padding:10px 22px;
+            position:sticky; top:0; z-index:9; display:flex; align-items:center; gap:18px; }
+  .logo { font-weight:700; font-size:16px; }
+  .pills { display:flex; gap:8px; }
+  .pill { padding:6px 18px; border-radius:18px; background:#eef1f5; cursor:pointer;
+          font-size:14px; color:var(--sub); user-select:none; }
+  .pill.on { background:var(--blue); color:#fff; font-weight:bold; }
+  .tabs { display:flex; gap:4px; margin-left:auto; }
+  .tab { padding:8px 16px; cursor:pointer; color:var(--sub); font-size:14px;
+         border-bottom:2.5px solid transparent; user-select:none; }
+  .tab.on { color:var(--blue); border-bottom-color:var(--blue); font-weight:bold; }
+  .wrap { padding:18px 22px; max-width:1240px; margin:0 auto; }
+  .hide { display:none; }
+
+  .top { display:flex; gap:14px; margin-bottom:14px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 20px; flex:1; }
+  .stat .k { color:var(--sub); font-size:13px; }
+  .stat .v { font-size:26px; font-weight:700; margin-top:2px; }
+  .rooms { display:grid; gap:12px; margin-bottom:14px; }
+  .room { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:12px 14px; position:relative; transition:all .3s; }
+  .room .rid { font-size:13px; color:var(--sub); }
+  .room .pool { font-size:24px; font-weight:700; margin:2px 0; }
+  .room .pc { font-size:12px; color:var(--sub); }
+  .room .bar { height:6px; background:#eef1f5; border-radius:3px; margin-top:8px; overflow:hidden; }
+  .room .bar i { display:block; height:100%; background:var(--blue); border-radius:3px; transition:width .4s; }
+  .room.dead { border-color:var(--red); background:#fff5f5; }
+  .room.dead::after { content:"被击杀"; position:absolute; top:8px; right:10px;
+                      color:#fff; background:var(--red); font-size:11px; padding:2px 8px; border-radius:10px; }
+  .room.winner { border-color:var(--gold); background:#fffbea; }
+  .room.winner::after { content:"冠军"; position:absolute; top:8px; right:10px;
+                        color:#fff; background:var(--gold); font-size:11px; padding:2px 8px; border-radius:10px; }
+  .room .rk { position:absolute; top:8px; right:10px; font-size:11px; color:var(--gold); font-weight:700; }
+  .live-grid { display:grid; grid-template-columns:1fr 340px; gap:14px; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .panel h3 { margin:0 0 10px; font-size:14px; }
+  #evlist { max-height:460px; overflow-y:auto; font-size:13px; }
+  .ev { padding:6px 4px; border-bottom:1px dashed var(--line); color:var(--sub); }
+  .ev .t { color:#adbac7; font-size:11px; margin-right:6px; }
+  .ev.kill { color:var(--red); } .ev.join { color:var(--green); } .ev.leave { color:var(--amber); }
+  .ev.lock { color:var(--blue); } .ev.bet { color:var(--txt); } .ev.settle { color:var(--amber); }
+
+  #histwrap { max-height:660px; overflow:auto; border-radius:10px; border:1px solid var(--line); }
+  table.hist { width:100%; border-collapse:collapse; font-size:13px; background:var(--card); }
+  table.hist th, table.hist td { padding:7px 10px; border-bottom:1px solid var(--line); text-align:center; }
+  table.hist th { background:#f0f3f7; position:sticky; top:0; }
+  .dead-cell { background:#ffebe9; color:var(--red); font-weight:700; border-radius:4px; }
+  .win-cell { background:#fff8e6; color:var(--gold); font-weight:700; border-radius:4px; }
+
+  .cards { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin-bottom:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .card .k { color:var(--sub); font-size:12px; }
+  .card .v { font-size:20px; font-weight:700; margin-top:3px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .chart { height:250px; }
+  .pos { color:var(--green); } .neg { color:var(--red); } .neu { color:var(--amber); }
+  table.strat { width:100%; border-collapse:collapse; font-size:13px; }
+  table.strat th, table.strat td { padding:6px 8px; text-align:right; border-bottom:1px solid var(--line); }
+  table.strat th:first-child, table.strat td:first-child { text-align:left; }
+  .verdict { background:var(--card); border:1px solid var(--line); border-radius:10px;
+             padding:14px; margin-top:14px; font-size:14px; }
+
+  /* 自动下注 */
+  .bot-grid { display:grid; grid-template-columns:400px 1fr; gap:14px; }
+  .frm { margin-bottom:12px; }
+  .frm label { display:block; font-size:13px; color:var(--sub); margin-bottom:4px; }
+  .frm input, .frm select { width:100%; padding:8px 10px; border:1px solid var(--line);
+       border-radius:6px; font-size:14px; }
+  .btn { display:inline-block; padding:8px 20px; border:none; border-radius:6px; background:var(--blue);
+         color:#fff; font-size:14px; cursor:pointer; }
+  .btn.gray { background:#8b949e; } .btn.red { background:var(--red); } .btn.green { background:var(--green); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .hint { font-size:12px; color:var(--sub); }
+  .toggle { display:flex; align-items:center; gap:10px; padding:12px; background:#f0f7ff;
+            border:1px solid #b6d4f5; border-radius:8px; margin-bottom:12px; }
+  @keyframes pulse { 0%{transform:scale(1);opacity:1} 50%{transform:scale(1.35);opacity:.55} 100%{transform:scale(1);opacity:1} }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:2px; vertical-align:middle; }
+  .dot.run { background:var(--green); animation:pulse 1.6s infinite; box-shadow:0 0 0 3px rgba(26,127,55,.15); }
+  .dot.conn { background:var(--amber); animation:blink 1.2s infinite; }
+  .dot.stop { background:var(--red); }
+  @keyframes coinspin { 0%{transform:rotateY(0)} 100%{transform:rotateY(360deg)} }
+  table.bets { width:100%; border-collapse:collapse; font-size:13px; }
+  table.bets th, table.bets td { padding:6px 8px; text-align:center; border-bottom:1px solid var(--line); }
+  .sim-card { border:1px solid var(--line); border-radius:8px; margin-bottom:8px; overflow:hidden; }
+  .sim-head { display:flex; align-items:center; gap:12px; padding:10px 14px; cursor:pointer; background:#fafbfc; }
+  .sim-head:hover { background:#f0f3f7; }
+  .sim-head .nm { font-weight:600; min-width:190px; }
+  .sim-head .st { font-size:12px; color:var(--sub); }
+  .sim-body { display:none; padding:8px 14px 12px; border-top:1px solid var(--line); }
+  .sim-card.open .sim-body { display:block; }
+  .wchip { display:inline-block; min-width:34px; padding:1px 6px; margin:1px; border-radius:4px; font-size:11px; }
+  .wchip.w { background:#dafbe1; color:#1a7f37; } .wchip.l { background:#ffebe9; color:#cf222e; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="logo">🎮 露露娱乐</div>
+  <div class="pills" id="pills"></div>
+  <div class="tabs">
+    <div class="tab on" onclick="showTab('live',this)">⚡ 实时盘面</div>
+    <div class="tab" onclick="showTab('hist',this)">📜 历史记录</div>
+    <div class="tab" onclick="showTab('strat',this)">📊 策略分析<span style="font-size:10px;color:#adbac7">(逃杀)</span></div>
+    <div class="tab" onclick="showTab('bot',this)">🤖 自动下注<span style="font-size:10px;color:#adbac7">(逃杀)</span></div>
+    <div class="tab" onclick="showTab('hv',this)">📦 仓库收取</div>
+    <div class="tab" onclick="showTab('settings',this)">⚙️ 设置</div>
+  </div>
+  <div style="margin-left:12px;font-size:13px;color:var(--sub);display:flex;align-items:center;gap:10px">
+    <span id="whoami"></span>
+    <a onclick="logout()" style="color:var(--red);cursor:pointer;font-size:12px">退出</a>
+  </div>
+</div>
+
+<div class="wrap" id="live">
+  <div class="top">
+    <div class="stat"><div class="k">当前回合</div><div class="v" id="l-round">--</div></div>
+    <div class="stat"><div class="k">状态</div><div class="v" id="l-status" style="font-size:20px">--</div></div>
+    <div class="stat"><div class="k" id="l-cd-label">下注倒计时</div><div class="v" id="l-cd" style="color:var(--blue)">--</div></div>
+    <div class="stat"><div class="k">全场总池</div><div class="v" id="l-total">--</div></div>
+    <div class="stat"><div class="k">在局玩家</div><div class="v" id="l-players">--</div></div>
+    <div class="stat"><div class="k">数据更新</div><div class="v" id="l-upd" style="font-size:14px;margin-top:8px">--</div></div>
+  </div>
+  <div class="live-grid">
+    <div>
+      <div class="rooms" id="rooms"></div>
+      <div class="panel"><h3>本回合池子走势（总池/最大/最小）</h3><div id="chart-pool" class="chart"></div></div>
+    </div>
+    <div class="panel"><h3>实时事件</h3><div id="evlist"></div></div>
+  </div>
+</div>
+
+<div class="wrap hide" id="hist">
+  <div id="histwrap"><table class="hist" id="histtbl"></table></div>
+</div>
+
+<div class="wrap hide" id="strat">
+  <div class="cards" id="cards"></div>
+  <div class="grid2">
+    <div class="panel"><h3>各房间被杀次数（均匀期望线）</h3><div id="chart-kill" class="chart"></div></div>
+    <div class="panel"><h3>池大小五分位 → 被杀率（期望 12.5%）</h3><div id="chart-bucket" class="chart"></div></div>
+    <div class="panel"><h3>策略累计盈亏曲线（全部 7 策略 · 每回合满注 5 彩石）</h3><div id="chart-curve" class="chart"></div></div>
+    <div class="panel"><h3>smartEV 每注收益率 · 95% 置信区间 vs 理论</h3><div id="chart-ci" class="chart"></div></div>
+  </div>
+  <div class="panel" style="margin-top:14px"><h3>策略对比</h3><table class="strat" id="strtbl"></table></div>
+  <div class="verdict" id="verdict"></div>
+</div>
+
+<div class="wrap hide" id="bot">
+  <div class="bot-grid">
+    <div>
+<div class="panel" style="margin-top:14px">
+        <h3>🎯 策略模拟盘（虚拟下注 · 不花真钱）
+          <span style="float:right;font-weight:400;color:var(--sub);font-size:12px">
+            近 <span id="sim-rounds">--</span> 回合 ·
+            <a onclick="refreshSim()" style="color:var(--blue);cursor:pointer">刷新</a>
+          </span></h3>
+        <div class="hint" style="margin-bottom:8px">六个策略对真实回合做模拟下注（每注按 5 彩石虚拟计），点击卡片展开逐回合输赢。</div>
+        <div id="sim-list"></div>
+      </div>
+    </div>
+    <div>
+<div class="panel">
+        <h3>🤖 自动下注设置（星海逃杀）</h3>
+        <div class="toggle">
+          <span style="font-size:15px;font-weight:700" id="bot-state">未启动</span>
+          <span class="hint" id="bot-sub"></span>
+        </div>
+        <div class="grid2" style="grid-template-columns:1fr 1fr">
+          <div class="frm"><label>策略</label>
+            <select id="f-strategy">
+              <option value="smartev">smartEV（押结构期望最高房）</option>
+              <option value="room1">固定押1号房（实测被杀率最低 7.6%）</option>
+              <option value="maxplayers">押人最多房（击杀偏向人少的房）</option>
+              <option value="follow">跟随最优（每回合自动跟随近30盘收益最高的策略）</option>
+              <option value="minpool">押最小池</option>
+              <option value="maxpool">押最大池</option>
+              <option value="random">随机</option>
+            </select></div>
+          <div class="frm"><label>每注彩石（0.1 的倍数；自动按官方档位 0.1/1/10 组合下单，如 0.3→0.1×3）</label><input id="f-amount" type="number" step="0.1" min="0.1" value="0.1"></div>
+        </div>
+        <div class="frm"><label>今日亏损上限（当天亏损达到即自动暂停，跨天自动重新计算）</label>
+          <input id="f-maxloss" type="number" step="0.1" min="0.1" value="10"></div>
+          <div class="frm"><label>今日止盈（当天盈利达到即自动落袋暂停）</label>
+          <input id="f-tpprofit" type="number" step="0.1" min="0.1" value="5"></div>
+        <div class="row" style="margin-top:6px">
+          <button class="btn green" id="btn-on" onclick="botOn()">▶ 开启自动下注</button>
+          <button class="btn red" id="btn-off" onclick="botOff()">■ 暂停</button>
+          <span class="hint">在每回合倒计时剩 3 秒时下注（奖池定型）</span>
+        </div>
+        <div id="bot-msg" class="hint" style="margin-top:8px;color:var(--red)"></div>
+      </div>
+      <div class="panel" style="margin-top:14px">
+        <h3>当前回合 <span id="b-round" style="color:var(--blue)">--</span>
+          <span style="font-weight:400;color:var(--sub)">｜ <span id="b-status">--</span></span>
+          <span style="float:right;font-weight:400;color:var(--sub)">剩余 <span id="b-cd" style="font-size:20px;font-weight:700;color:var(--blue)">--</span> 秒 ｜ 总池 ~<span id="b-pool">--</span></span></h3>
+        <div style="font-size:12px;color:var(--sub);margin-bottom:8px">累计盈亏 <span id="bot-pnl" style="font-size:15px;font-weight:700">0.00</span>
+          ｜ 今日盈亏 <span id="bot-today" style="font-size:15px;font-weight:700">0.00</span>
+          ｜ 余额 <span id="bot-bal" style="font-size:15px;font-weight:700">--</span>
+          ｜ 今日统计 投入 <span id="gs-consume" style="font-weight:700">--</span>
+          / 收入 <span id="gs-gain" style="font-weight:700">--</span></div>
+        <table class="bets" id="bettbl">
+          <tr><th>时间</th><th>回合</th><th>房间</th><th>金额</th><th>结果</th><th>盈亏</th></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 仓库收取 ============ -->
+<div class="wrap hide" id="hv">
+  <div class="bot-grid">
+    <div>
+      <div class="panel">
+        <h3>📦 仓库自动收取（宝石）</h3>
+        <div class="hint" style="margin-bottom:12px">
+          基地每 30 分钟产一批宝石；引擎直接计算下次产出时刻，到点收取（±10 秒）。
+          使用与下注相同的游戏 token（在"自动下注"页登录或粘贴保存，全局共用）。
+        </div>
+        <div class="toggle" style="background:#f6fef8;border-color:#b6e5c4">
+          <span style="font-size:15px;font-weight:700" id="hv-state">未开启</span>
+          <span class="hint" id="hv-sub"></span>
+        </div>
+        <div class="row">
+          <button class="btn green" onclick="hvOn()">▶ 开启自动收取</button>
+          <button class="btn gray" onclick="hvOff()">■ 关闭</button>
+        </div>
+        <div class="hint" style="margin-top:8px" id="hv-msg"></div>
+      </div>
+    </div>
+    <div>
+      <div class="panel">
+        <h3>⚡ 手动收取</h3>
+        <div class="hint" style="margin-bottom:12px">立即检查一次仓库并收取（无论自动收取是否开启）。</div>
+        <button class="btn" onclick="hvRunNow()">立即收取一次</button>
+        <div style="margin-top:16px" class="hint" id="hv-last"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============ 设置 ============ -->
+<div class="wrap hide" id="settings">
+  <div class="bot-grid">
+    <div>
+      <div class="panel">
+        <h3>🔑 Token（全局共用：下注/余额/收仓库都用它）</h3>
+        <div class="frm"><label>当前 Token</label>
+          <div class="row"><span id="tok-show" class="hint" style="flex:1">--</span>
+          <button class="btn gray" onclick="refreshToken()">刷新</button></div></div>
+        <div class="frm"><label>余额（彩石 item 102201）</label>
+          <div class="row"><span id="bal" style="flex:1;font-size:18px;font-weight:700">--</span>
+          <button class="btn gray" onclick="refreshBal()">查询</button></div></div>
+        <hr style="border:none;border-top:1px dashed var(--line);margin:12px 0">
+        <div class="frm"><label>手机号</label><input id="f-tel" placeholder="13x xxxx xxxx" maxlength="11"></div>
+        <div class="frm row">
+          <input id="f-code" placeholder="验证码" style="flex:1" maxlength="6">
+          <button class="btn gray" id="btn-send" onclick="sendCode()">发验证码</button>
+        </div>
+        <button class="btn" onclick="doLogin()">登录拿 Token</button>
+        <div class="hint" style="margin-top:8px" id="login-msg"></div>
+        <hr style="border:none;border-top:1px dashed var(--line);margin:12px 0">
+        <div class="frm"><label>或手动粘贴 Token</label><input id="f-token" placeholder="32位token"></div>
+        <button class="btn gray" onclick="saveToken()">保存</button>
+    </div>
+    </div>
+    <div>
+      <div class="panel">
+        <h3>ℹ️ 说明</h3>
+        <div class="hint" style="line-height:2">
+          · Token 全局共用：自动下注、余额查询、仓库收取都使用这里保存的 Token<br>
+          · Token 失效表现：余额查询报错 / 下注引擎频繁断线——重新发验证码登录即可<br>
+          · 游戏为单设备登录：手机登录游戏会使此处 Token 失效，反之亦然
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const CFG = {
+  steal: { name:'逃杀', slots:8, label:i=>i+'号·'+({1:'货舱',2:'医务室',3:'休息室',4:'维生舱',5:'指挥室',6:'食堂',7:'通讯室',8:'操作台'})[i],
+           statusMap:{1:'等待开始',2:'下注中',3:'结算中'} },
+  cock:  { name:'斗鸡', slots:2, label:i=>({1:'啄不服',2:'咯无敌'})[i], statusMap:{0:'下注中',1:'比赛中',2:'结算中'} },
+  fox:   { name:'赛马', slots:6, label:i=>['绿晶晶','紫莹莹','蓝溜溜','胖噜噜','黄沙沙','红墩墩'][i-1],
+           statusMap:{0:'准备/下注',1:'比赛中',2:'结算中'} },
+};
+let game = 'steal';
+let charts = {};
+let poolHist = [], lastRound = null;
+
+document.getElementById('pills').innerHTML =
+  Object.entries(CFG).map(([k,c])=>`<div class="pill ${k==='steal'?'on':''}" onclick="setGame('${k}',this)">${c.name}</div>`).join('');
+function setGame(k, el){
+  game = k; lastRound = null; poolHist = [];
+  document.querySelectorAll('.pill').forEach(p=>p.classList.remove('on'));
+  el.classList.add('on');
+  document.getElementById('l-cd-label').textContent = (k!=='steal')?'回合倒计时':'下注倒计时';
+  refreshLive(); refreshHist();
+}
+function showTab(id, el){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));
+  el.classList.add('on');
+  ['live','hist','strat','bot','hv','settings'].forEach(x=>document.getElementById(x).classList.toggle('hide', x!==id));
+  if(id==='strat') refreshStrat();
+  if(id==='hist') refreshHist();
+  if(id==='bot') refreshBot();
+  if(id==='hv') refreshHv();
+  if(id==='settings'){ refreshToken(); refreshBal(); }
+}
+function fmtT(ts){ const d=new Date((ts+8*3600)*1000); return [d.getUTCHours(),d.getUTCMinutes(),d.getUTCSeconds()].map(x=>String(x).padStart(2,'0')).join(':'); }
+function fmtPct(v,d=2){ return (v*100).toFixed(d)+'%'; }
+function cls(v){ return v>0?'pos':(v<0?'neg':'neu'); }
+async function logout(){
+  await fetch('/api/auth/logout', {method:'POST'});
+  location.reload();
+}
+fetch('/api/auth/me').then(r=>r.json()).then(d=>{
+  if(d.code===0) document.getElementById('whoami').textContent = '👤 '+d.username;
+});
+
+/* ---------- 实时盘面 ---------- */
+async function refreshLive(){
+  let d; try { d = await (await fetch('/api/live?game='+game)).json(); } catch(e){ return; }
+  if(d.empty){ document.getElementById('l-round').textContent='(等待采集器)'; return; }
+  const c = CFG[game];
+  document.getElementById('l-round').textContent = d.roundId ?? '--';
+  const stEl = document.getElementById('l-status');
+  stEl.textContent = c.statusMap[d.status] ?? (d.status??'--');
+  stEl.style.color = d.status===2 ? 'var(--blue)' : (d.status===3 ? 'var(--amber)' : 'var(--sub)');
+  const tot = Object.values(d.pools||{}).reduce((a,b)=>a+b,0);
+  document.getElementById('l-total').textContent = tot.toFixed(1);
+  document.getElementById('l-players').textContent = Object.values(d.players||{}).reduce((a,b)=>a+b,0);
+  document.getElementById('l-upd').textContent = fmtT(d.updated/1000);
+
+  const pools = d.pools||{}; const mx = Math.max(1, ...Object.values(pools));
+  const rankArr = d.rank||[];
+  document.getElementById('rooms').style.gridTemplateColumns =
+    `repeat(${game==='cock'?2:(game==='fox'?3:4)},1fr)`;
+  document.getElementById('rooms').innerHTML = Array.from({length:c.slots},(_,i)=>i+1).map(r=>{
+    const p = pools[r]||0;
+    let extra='', cl='';
+    const rk = rankArr.find(x=>x.item_id===r);
+    if(game==='steal'){
+      if((d.lastKilled||[]).includes(r) && d.status!==2) cl='dead';
+    } else {
+      if(d.winner===r && d.status!==0) cl='winner';
+      else if(rk && d.status!==0) extra = `<span class="rk">${rk.rank}st</span>`;
+    }
+    return `<div class="room ${cl}">
+      <div class="rid">${c.label(r)}</div>
+      <div class="pool">${p.toFixed(1)}</div>
+      <div class="pc">${(d.players||{})[r]||0} 人</div>
+      <div class="bar"><i style="width:${(p/mx*100).toFixed(1)}%"></i></div>${extra}
+    </div>`; }).join('');
+
+  if(lastRound !== d.roundId){ poolHist=[]; lastRound=d.roundId; }
+  const vals = Object.values(pools);
+  poolHist.push({t:fmtT(d.updated/1000), tot:+tot.toFixed(1),
+                 mx:+Math.max(...vals,0).toFixed(1), mn:+Math.min(...vals,0).toFixed(1)});
+  if(poolHist.length>200) poolHist.shift();
+  if(!charts.pool) charts.pool = echarts.init(document.getElementById('chart-pool'));
+  charts.pool.setOption({
+    tooltip:{trigger:'axis'}, legend:{top:0,textStyle:{fontSize:11}},
+    grid:{left:44,right:16,top:26,bottom:26},
+    xAxis:{type:'category',data:poolHist.map(x=>x.t),axisLabel:{show:false}},
+    yAxis:{scale:true},
+    series:[
+      {name:'总池',type:'line',showSymbol:false,data:poolHist.map(x=>x.tot),lineStyle:{color:'#0969da'}},
+      {name:'最大',type:'line',showSymbol:false,data:poolHist.map(x=>x.mx),lineStyle:{color:'#9a6700'}},
+      {name:'最小',type:'line',showSymbol:false,data:poolHist.map(x=>x.mn),lineStyle:{color:'#1a7f37'}},
+    ]});
+  document.getElementById('evlist').innerHTML = (d.events||[]).map(e=>
+    `<div class="ev ${e.type}"><span class="t">${fmtT(e.ts)}</span>${e.text}</div>`).join('');
+}
+setInterval(refreshLive, 3000);
+
+/* ---------- 历史 ---------- */
+async function refreshHist(){
+  let d; try { d = await (await fetch('/api/history?game='+game)).json(); } catch(e){ return; }
+  const c = CFG[game];
+  let html = '<tr><th>回合</th><th>时间</th><th>总池</th>';
+  for(let r=1;r<=c.slots;r++) html += `<th>${r}<br><span style="font-weight:400;font-size:10px">${c.label(r).split('·').pop()}</span></th>`;
+  html += game==='steal' ? '<th>被杀</th>' : '<th>冠军</th>';
+  html += '</tr>' + d.rows.map(row=>{
+    const mx = Math.max(...row.pools, 0.001);
+    let cells = row.pools.map((p,i)=>{
+      const rid=i+1;
+      const isR = game==='steal' ? row.killed.includes(rid) : (row.winner===rid);
+      return `<td class="${isR?(game==='steal'?'dead-cell':'win-cell'):''}">
+              <span style="display:inline-block;min-width:44px">${p.toFixed(0)}</span>
+              <div style="height:3px;background:#eef1f5;border-radius:2px"><i style="display:block;height:3px;width:${Math.round(p/mx*36)}px;background:#0969da;border-radius:2px"></i></div></td>`;
+    }).join('');
+    const res = game==='steal' ? `<td style="color:var(--red);font-weight:700">${row.killed.join(',')}</td>`
+                               : `<td style="color:var(--gold);font-weight:700">${row.winner??'-'}</td>`;
+    return `<tr><td><b>${row.roundId}</b></td><td>${row.time}</td><td>${row.pools.reduce((a,b)=>a+b,0).toFixed(0)}</td>${cells}${res}</tr>`;
+  }).join('');
+  document.getElementById('histtbl').innerHTML = html;
+}
+
+/* ---------- 策略分析 ---------- */
+async function refreshStrat(){
+  const d = await (await fetch('/api/strat')).json();
+  if(d.error) return;
+  const cards = [
+    ['样本回合', d.n, ''], ['smartEV 理论/注', fmtPct(d.theory_ev,1), 'pos'],
+    ['smartEV 实测/注', fmtPct(d.smart_roi), cls(d.smart_roi)],
+    ['95% CI /注', '['+fmtPct(d.ci_lo/5)+', '+fmtPct(d.ci_hi/5)+']', d.ci_lo>0?'pos':(d.ci_hi<0?'neg':'neu')],
+    ['MC 百分位', d.mc_pct+'%', d.mc_pct<5?'neg':'neu'],
+    ['偏杀小池 z', d.z_pool.toFixed(2), d.z_pool<-1.96?'neg':'neu'],
+  ];
+  document.getElementById('cards').innerHTML = cards.map(c=>
+    `<div class="card"><div class="k">${c[0]}</div><div class="v ${c[2]}">${c[1]}</div></div>`).join('');
+  const ax = {axisLine:{lineStyle:{color:'#d0d7de'}},axisLabel:{color:'#57606a'}};
+  if(!charts.kill) charts.kill = echarts.init(document.getElementById('chart-kill'));
+  charts.kill.setOption({ tooltip:{}, grid:{left:36,right:16,top:16,bottom:40},
+    xAxis:{type:'category',data:d.kill.rooms,...ax}, yAxis:ax,
+    series:[{type:'bar',data:d.kill.obs,itemStyle:{color:'#cf222e'},barWidth:'55%',
+      markLine:{silent:true,symbol:'none',lineStyle:{color:'#9a6700',type:'dashed'},data:[{yAxis:d.kill.exp}]}}]});
+  if(!charts.bucket) charts.bucket = echarts.init(document.getElementById('chart-bucket'));
+  charts.bucket.setOption({ tooltip:{formatter:p=>p.name+': '+p.value+'%'}, grid:{left:40,right:16,top:16,bottom:46},
+    xAxis:{type:'category',data:d.buckets.map(b=>b.label),axisLabel:{rotate:18,fontSize:10,color:'#57606a'}},
+    yAxis:{...ax,axisLabel:{formatter:'{value}%'}},
+    series:[{type:'bar',data:d.buckets.map(b=>(b.rate*100).toFixed(1)),itemStyle:{color:'#0969da'},barWidth:'55%',
+      markLine:{silent:true,symbol:'none',lineStyle:{color:'#9a6700',type:'dashed'},data:[{yAxis:12.5}]}}]});
+  if(!charts.curve) charts.curve = echarts.init(document.getElementById('chart-curve'));
+  charts.curve.setOption({ tooltip:{trigger:'axis'}, legend:{top:0,textStyle:{fontSize:11,color:'#57606a'}},
+    grid:{left:40,right:16,top:28,bottom:24},
+    xAxis:{type:'category',data:d.curve.rounds,axisLabel:{show:false}}, yAxis:ax,
+    series:[
+      {name:'smartEV',type:'line',showSymbol:false,data:d.curve.smart,itemStyle:{color:'#1a7f37'},lineStyle:{color:'#1a7f37'}},
+      {name:'random',type:'line',showSymbol:false,data:d.curve.random,itemStyle:{color:'#57606a'},lineStyle:{color:'#57606a'}},
+      {name:'maxpool',type:'line',showSymbol:false,data:d.curve.maxpool,itemStyle:{color:'#9a6700'},lineStyle:{color:'#9a6700'}},
+      {name:'minpool',type:'line',showSymbol:false,data:d.curve.minpool,itemStyle:{color:'#0969da'},lineStyle:{color:'#0969da'}},
+      {name:'room1',type:'line',showSymbol:false,data:d.curve.room1,itemStyle:{color:'#8250df'},lineStyle:{color:'#8250df'}},
+      {name:'maxplayers',type:'line',showSymbol:false,data:d.curve.maxplayers,itemStyle:{color:'#cf222e'},lineStyle:{color:'#cf222e'}},
+      {name:'follow',type:'line',showSymbol:false,data:d.curve.follow,itemStyle:{color:'#bf8700'},lineStyle:{color:'#bf8700',type:'dashed'}}]});
+  if(!charts.ci) charts.ci = echarts.init(document.getElementById('chart-ci'));
+  charts.ci.setOption({ grid:{left:60,right:30,top:20,bottom:26},
+    xAxis:{type:'category',data:['smartEV']}, yAxis:{...ax,axisLabel:{formatter:v=>(v*100).toFixed(1)+'%'}},
+    series:[{type:'custom', renderItem:(params,api)=>{
+        const lo=api.value(1),hi=api.value(2),pt=api.value(3),t=api.coord([0,api.value(4)])[1];
+        const x=api.coord([0,0])[0], p1=api.coord([0,hi]),p2=api.coord([0,lo]),cc=api.coord([0,pt]);
+        return {type:'group',children:[
+          {type:'line',shape:{x1:x-34,y1:p1[1],x2:x+34,y2:p1[1]},style:{stroke:'#1a7f37'}},
+          {type:'line',shape:{x1:x-34,y1:p2[1],x2:x+34,y2:p2[1]},style:{stroke:'#1a7f37'}},
+          {type:'line',shape:{x1:x,y1:p1[1],x2:x,y2:p2[1]},style:{stroke:'#1a7f37',lineWidth:2}},
+          {type:'circle',shape:{cx:cc[0],cy:cc[1],r:5},style:{fill:'#1a7f37'}},
+          {type:'line',shape:{x1:x-44,y1:t,x2:x+44,y2:t},style:{stroke:'#9a6700',type:'dashed',lineWidth:2}}]};},
+      data:[[0,d.ci_lo/5,d.ci_hi/5,d.smart_roi,d.theory_ev]]}]});
+  document.getElementById('strtbl').innerHTML =
+    '<tr><th>策略</th><th>胜率</th><th>总盈亏</th><th>ROI/注</th></tr>' +
+    d.strats.map(s=>`<tr><td>${s.name}</td><td>${fmtPct(s.wr,1)}</td>
+      <td class="${cls(s.pnl)}">${s.pnl.toFixed(2)}</td><td class="${cls(s.roi)}">${fmtPct(s.roi)}</td></tr>`).join('');
+  document.getElementById('verdict').innerHTML = '<b>当前判定：</b>' + d.verdict;
+}
+
+/* ---------- Token 工具 ---------- */
+async function refreshToken(){
+  const d = await (await fetch('/api/token')).json();
+  document.getElementById('tok-show').textContent = d.token || '(未设置)';
+}
+async function refreshBal(){
+  document.getElementById('bal').textContent = '查询中…';
+  const d = await (await fetch('/api/balance')).json();
+  document.getElementById('bal').textContent = d.code===0 ? (d.balance??'?') : ('⚠ '+d.msg);
+  document.getElementById('bal').className = d.code===0 ? '' : 'neg';
+}
+async function sendCode(){
+  const tel = document.getElementById('f-tel').value.trim();
+  if(!/^1\d{10}$/.test(tel)){ document.getElementById('login-msg').textContent='手机号格式不对'; return; }
+  document.getElementById('btn-send').disabled = true;
+  document.getElementById('login-msg').textContent = '发送中…';
+  const d = await (await fetch('/api/login/send', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({tel})})).json();
+  document.getElementById('login-msg').textContent = d.code===0 ? '✅ 验证码已发送，查收短信' : ('❌ '+(d.msg||'失败'));
+  let cd = 60; const b = document.getElementById('btn-send');
+  const iv = setInterval(()=>{ b.textContent = `重发(${cd--}s)`; if(cd<=0){clearInterval(iv);b.disabled=false;b.textContent='发验证码';} },1000);
+}
+async function doLogin(){
+  const tel = document.getElementById('f-tel').value.trim();
+  const code = document.getElementById('f-code').value.trim();
+  document.getElementById('login-msg').textContent = '登录中…';
+  const d = await (await fetch('/api/login/do', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({tel, code})})).json();
+  if(d.code===0 && d.data && d.data.token){
+    document.getElementById('login-msg').textContent = '✅ 登录成功，Token 已保存';
+    refreshToken(); refreshBal();
+  } else {
+    document.getElementById('login-msg').textContent = '❌ '+(d.msg||'登录失败');
+  }
+}
+async function saveToken(){
+  const token = document.getElementById('f-token').value.trim();
+  const d = await (await fetch('/api/token', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({token})})).json();
+  document.getElementById('login-msg').textContent = d.code===0 ? '✅ 已保存' : ('❌ '+d.msg);
+  refreshToken();
+}
+
+/* ---------- 策略模拟盘 ---------- */
+async function refreshSim(){
+  let d; try { d = await (await fetch('/api/bot/sim')).json(); } catch(e){ return; }
+  if(d.error){ document.getElementById('sim-list').innerHTML = '<div class="hint">'+d.error+'</div>'; return; }
+  document.getElementById('sim-rounds').textContent = d.rounds;
+  document.getElementById('sim-list').innerHTML = d.strats.map(s => `
+    <div class="sim-card" id="sim-${s.key}">
+      <div class="sim-head" onclick="toggleSim('${s.key}')">
+        <span class="nm">${s.name}</span>
+        <span style="font-size:17px;font-weight:700" class="${cls(s.pnl)}">${(s.pnl>=0?'+':'')+s.pnl.toFixed(2)}</span>
+        <span style="margin-left:auto;color:var(--sub)">▾</span>
+      </div>
+      <div class="sim-body">
+        <div style="margin-bottom:6px" class="hint">最近 ${s.detail.length} 回合（点标签收起）：</div>
+        ${s.detail.map(x=>`<span class="wchip ${x.win?'w':'l'}">${x.roundId}房${x.room} ${x.win?'赢':'输'}${x.pnl>=0?'+':''}${x.pnl.toFixed(2)}</span>`).join('')}
+      </div>
+    </div>`).join('');
+}
+function toggleSim(k){
+  document.getElementById('sim-'+k).classList.toggle('open');
+}
+setInterval(()=>{ if(!document.getElementById('bot').classList.contains('hide')) refreshSim(); }, 30000);
+refreshSim();
+
+/* ---------- 回合简报 ---------- */
+let botLive = null;
+async function botLivePoll(){
+  try { botLive = await (await fetch('/api/live?game=steal')).json(); } catch(e){}
+}
+function botLiveTick(){
+  if(!botLive || botLive.empty) return;
+  document.getElementById('b-round').textContent = botLive.roundId ?? '--';
+  const sm = {1:'等待开始',2:'下注中',3:'结算中'};
+  document.getElementById('b-status').textContent = sm[botLive.status] ?? botLive.status;
+  const tot = Object.values(botLive.pools||{}).reduce((a,b)=>a+b,0);
+  document.getElementById('b-pool').textContent = tot.toFixed(0);
+  const cd = document.getElementById('b-cd');
+  if(botLive.status===2 && botLive.countdownEndTime){
+    const s = (botLive.countdownEndTime - Date.now())/1000;
+    if(s>0){ cd.textContent = s.toFixed(0); cd.style.color = s<=10?'var(--red)':'var(--blue)'; }
+    else { cd.textContent='0'; cd.style.color='var(--red)'; }
+  } else { cd.textContent='--'; cd.style.color='var(--sub)'; }
+}
+setInterval(botLivePoll, 3000); botLivePoll();
+setInterval(botLiveTick, 1000);
+
+/* ---------- 仓库自动收取 ---------- */
+async function hvOn(){
+  const d = await (await fetch('/api/harvest/config', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:true})})).json();
+  document.getElementById('hv-msg').textContent = d.code===0 ? '' : ('❌ '+d.msg);
+  refreshHv();
+}
+async function hvOff(){
+  await fetch('/api/harvest/config', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:false})});
+  refreshHv();
+}
+async function hvRunNow(){
+  document.getElementById('hv-msg').textContent = '收取中…';
+  const d = await (await fetch('/api/harvest/run', {method:'POST'})).json();
+  document.getElementById('hv-msg').textContent =
+    (d.code===0 ? '✅ ' : '❌ ') + d.msg + (d.amount ? `（${d.amount} 宝石）` : '');
+  refreshHv(); refreshBotBal();
+}
+async function refreshHv(){
+  const d = await (await fetch('/api/harvest/config')).json();
+  const el = document.getElementById('hv-state');
+  if(d.enabled){ el.innerHTML = '<span class="dot run"></span> 自动收取中'; el.style.color='var(--green)'; }
+  else { el.innerHTML = '<span class="dot stop"></span> 未开启'; el.style.color='var(--sub)'; }
+  let s = d.lastTs ? `上次 ${d.lastTs} 收到 ${d.lastAmt} 宝石` : '尚未收取过';
+  if(d.seenQty > 0 && d.enabled) s += ` ｜ 仓库现存 ${d.seenQty}`;
+  if(d.enabled) s += d.nextTs ? ` ｜ 下次收取 ~${d.nextTs}（产出点）` : ' ｜ 监控中·产出即收';
+  document.getElementById('hv-sub').textContent = s;
+  const last = document.getElementById('hv-last');
+  if(last) last.textContent = s;
+}
+setInterval(()=>{ if(!document.getElementById('hv').classList.contains('hide')) refreshHv(); }, 10000);
+
+/* ---------- 自动下注 ---------- */
+let lastBetKey = null;
+async function botOn(){
+  const cfg = { enabled:true, strategy:document.getElementById('f-strategy').value,
+    amount:parseFloat(document.getElementById('f-amount').value)||0.1,
+    max_loss:parseFloat(document.getElementById('f-maxloss').value)||10,
+    take_profit:parseFloat(document.getElementById('f-tpprofit').value)||5 };
+  const d = await (await fetch('/api/bot/config', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg)})).json();
+  document.getElementById('bot-msg').textContent = d.code===0 ? '' : ('❌ '+d.msg);
+  refreshBot();
+}
+async function botOff(){
+  await fetch('/api/bot/config', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:false})});
+  refreshBot();
+}
+async function refreshBot(){
+  const [cfg, st] = await Promise.all([
+    (await fetch('/api/bot/config')).json(),
+    (await fetch('/api/bot/status')).json() ]);
+  document.getElementById('f-strategy').value = cfg.strategy||'smartev';
+  document.getElementById('f-amount').value = cfg.amount??0.1;
+  document.getElementById('f-maxloss').value = cfg.max_loss??10;
+  document.getElementById('f-tpprofit').value = cfg.take_profit??5;
+  const el = document.getElementById('bot-state');
+  if(st.enabled && st.hellBlock){
+    el.innerHTML = '<span class="dot conn"></span> 地狱模式时段·暂停下注（游戏时间19:55~21:05）';
+    el.style.color = 'var(--amber)';
+  } else if(st.enabled){
+    el.innerHTML = st.connected
+      ? '<span class="dot run"></span> 运行中'
+      : '<span class="dot conn"></span> 连接中…';
+    el.style.color = st.connected ? 'var(--green)' : 'var(--amber)';
+  } else {
+    el.innerHTML = '<span class="dot stop"></span> 已停止';
+    el.style.color = 'var(--red)';
+  }
+  document.getElementById('bot-sub').textContent =
+    `策略 ${st.strategy} · 每注 ${st.amount} · 亏限 ${st.maxLoss} · 止盈 ${st.takeProfit}` +
+    (st.stopReason ? ` · 停止原因: ${st.stopReason}` : '');
+  // 累计/今日盈亏均由 refreshGameStat 用游戏官方口径独占更新, 此处不再覆盖
+  document.getElementById('bettbl').innerHTML =
+    '<tr><th>时间</th><th>回合</th><th>房间</th><th>金额</th><th>结果</th><th>盈亏</th></tr>' +
+    (st.bets||[]).map(b=>`<tr><td>${b.time}</td><td>${b.roundId}</td><td>${b.room}</td>
+      <td>${b.amount}</td><td>${b.status}</td>
+      <td class="${cls(b.pnl)}">${(b.pnl>=0?'+':'')}${(b.pnl??0).toFixed(3)}</td></tr>`).join('');
+  // 有新结算 -> 刷新余额
+  const key = (st.bets||[])[0] ? st.bets[0].time + '|' + st.bets[0].roundId : '';
+  if(key && key !== lastBetKey && lastBetKey !== null){ refreshBotBal(); }
+  lastBetKey = key || lastBetKey;
+}
+async function refreshBotBal(){
+  try {
+    const d = await (await fetch('/api/balance')).json();
+    const el = document.getElementById('bot-bal');
+    if(d.code===0){ el.textContent = d.balance ?? '?'; el.className=''; }
+    else { el.textContent = d.msg||'--'; el.className='neg'; }
+  } catch(e){}
+}
+setInterval(()=>{ if(!document.getElementById('bot').classList.contains('hide')){ refreshBot(); } }, 5000);
+async function refreshGameStat(){
+  try {
+    const d = await (await fetch('/api/bot/gamestat')).json();
+    if(d.code===0){
+      document.getElementById('gs-consume').textContent = d.consume;
+      document.getElementById('gs-gain').textContent = d.gain;
+      // 今日盈亏与累计盈亏都采用游戏官方口径(累计=历史基线+官方每日存档+今日)
+      const t = document.getElementById('bot-today');
+      t.textContent = (d.net>=0?'+':'')+d.net.toFixed(3);
+      t.className = d.net>=0?'pos':'neg';
+      const p = document.getElementById('bot-pnl');
+      p.textContent = (d.cum>=0?'+':'')+d.cum.toFixed(3);
+      p.className = d.cum>=0?'pos':'neg';
+    }
+  } catch(e){}
+}
+setInterval(()=>{ if(!document.getElementById('bot').classList.contains('hide')) refreshGameStat(); }, 60000);
+refreshGameStat();
+refreshToken();
+refreshBotBal();
+refreshLive();
+</script>
+</body>
+</html>

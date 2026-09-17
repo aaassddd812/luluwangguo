@@ -1,0 +1,5 @@
+flask
+waitress
+requests
+websocket-client
+pycryptodome
