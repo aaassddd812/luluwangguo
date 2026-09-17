@@ -767,6 +767,8 @@ class Collector:
                     self.picks["follow"] = self.picks[best_sk]
                     self.picks["follow_of"] = best_sk
             self.log.info("[统一决策] 回合%s %s", self.round_id, self.picks)
+            # 决策立即落盘: 下注截止前消息可能安静(斗鸡), 引擎"等决策"模式依赖此刻可读
+            self.dump()
 
     def dump(self):
         st = {"updated": int(time.time() * 1000), "game": self.key, "gameName": self.cfg["name"],
@@ -1160,7 +1162,8 @@ class BetEngine:
             return
         # 用游戏服务器校准后的时间算剩余
         remain = (self.end_ms - (time.time() * 1000 + self.clock_off)) / 1000
-        if not (0 < remain <= self.lead):
+        # 窗口上限不低于统一决策时刻: 决策没发布就等, 不抢跑(lead 再大也不会提前于 T-5s 发单)
+        if not (0 < remain <= max(self.lead, Collector.SNAPSHOT_LEAD)):
             return
         if self.round_id in self.bet_rounds or self.round_id in self.pending:
             return
@@ -1168,8 +1171,11 @@ class BetEngine:
         st = bs["strategy"]
         if st == "follow" and self.game == "fox" and bt == 2:
             st = "smartev"  # 非冠军盘不提供 follow
-        # 优先使用采集器 T-5s 的统一决策(与模拟盘完全一致)
+        # 等决策模式: 采集器 T-5s 发布统一决策; 没拿到且离锁定还早(>3s)就等下一拍,
+        # T-3s 仍没有(采集器离线/重连中)才走本地兜底 —— 保证实盘与模拟盘选房同源
         room = self._unified_pick(st, bt)
+        if not room and remain > 3.0:
+            return
         if room:
             pass
         elif st == "minpool":
