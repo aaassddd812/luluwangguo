@@ -166,7 +166,6 @@
             近 <span id="sim-rounds">--</span> 回合 ·
             <a onclick="refreshSim()" style="color:var(--blue);cursor:pointer">刷新</a>
           </span></h3>
-        <div class="pills" id="simpills" style="margin-bottom:8px"></div>
         <div class="hint" style="margin-bottom:8px">各策略对真实回合做模拟下注（每注按 5 彩石虚拟计），点击卡片展开逐回合输赢。选房与实盘引擎同源（采集器 T-5s 统一决策）。</div>
         <div id="sim-list"></div>
       </div>
@@ -445,7 +444,12 @@ async function refreshStrat(){
       {name:'minpool',type:'line',showSymbol:false,data:d.curve.minpool,itemStyle:{color:'#0969da'},lineStyle:{color:'#0969da'}},
       {name:'room1',type:'line',showSymbol:false,data:d.curve.room1,itemStyle:{color:'#8250df'},lineStyle:{color:'#8250df'}},
       {name:'maxplayers',type:'line',showSymbol:false,data:d.curve.maxplayers,itemStyle:{color:'#cf222e'},lineStyle:{color:'#cf222e'}},
-      {name:'follow',type:'line',showSymbol:false,data:d.curve.follow,itemStyle:{color:'#bf8700'},lineStyle:{color:'#bf8700',type:'dashed'}}]});
+      {name:'follow',type:'line',showSymbol:false,data:d.curve.follow,itemStyle:{color:'#bf8700'},lineStyle:{color:'#bf8700',type:'dashed'}},
+      {name:'antisafe',type:'line',showSymbol:false,data:d.curve.antisafe,itemStyle:{color:'#d4a72c'},lineStyle:{color:'#d4a72c'}},
+      {name:'secondpool',type:'line',showSymbol:false,data:d.curve.secondpool,itemStyle:{color:'#bf7d0e'},lineStyle:{color:'#bf7d0e'}},
+      {name:'streaksafe',type:'line',showSymbol:false,data:d.curve.streaksafe,itemStyle:{color:'#2f81f7'},lineStyle:{color:'#2f81f7'}},
+      {name:'minplayers',type:'line',showSymbol:false,data:d.curve.minplayers,itemStyle:{color:'#8b949e'},lineStyle:{color:'#8b949e',type:'dotted'}},
+      {name:'median',type:'line',showSymbol:false,data:d.curve.median,itemStyle:{color:'#a371f7'},lineStyle:{color:'#a371f7',type:'dotted'}}]});
   if(!charts.ci) charts.ci = echarts.init(document.getElementById('chart-ci'));
   charts.ci.setOption({ grid:{left:60,right:30,top:20,bottom:26},
     xAxis:{type:'category',data:['smartEV']}, yAxis:{...ax,axisLabel:{formatter:v=>(v*100).toFixed(1)+'%'}},
@@ -512,10 +516,10 @@ async function saveToken(){
 /* ---------- 策略模拟盘 / 自动下注: 按游戏切换 ---------- */
 let botGame = 'steal', foxMode = 1;
 const STRATS = {
-  steal: [['smartev','smartEV（押结构期望最高房）'],['room1','固定押1号房（实测被杀率最低 7.6%）'],['maxplayers','押人最多房（击杀偏向人少的房）'],['follow','跟随最优（近30盘收益最高策略）'],['minpool','押最小池'],['maxpool','押最大池'],['random','随机']],
-  cock:  [['smartev','smartEV（综合池占比与近期胜率）'],['room1','固定押1号队·啄不服'],['maxplayers','押人最多队'],['follow','跟随最优（近30盘收益最高策略）'],['minpool','押池较小队'],['maxpool','押池较大队'],['random','随机']],
-  fox:   [['smartev','smartEV（历史冠军率×赔率 价值狐）'],['room1','固定押1号狐·绿晶晶'],['maxplayers','押人最多狐'],['follow','跟随最优（近30盘收益最高策略）'],['minpool','押最冷门狐'],['maxpool','押最热门狐'],['random','随机']],
-  foxnc: [['smartev','smartEV（押最可能落败的狐）'],['room1','固定押1号狐·绿晶晶'],['maxplayers','押人最多狐'],['minpool','押非冠军池较小狐'],['maxpool','押非冠军池较大狐'],['random','随机']],
+  steal: [['smartev','smartEV（押结构期望最高房）'],['secondpool','押池子第二小的房'],['streaksafe','押连续安全最久的房'],['room1','固定押1号房'],['room2','固定押2号房'],['maxplayers','押人最多房'],['minplayers','押人最少房'],['antisafe','押近期被杀最多（赌回归）'],['median','押池子中位数的房'],['follow','跟随最优（近30盘收益最高策略）'],['minpool','押最小池'],['maxpool','押最大池'],['random','随机']],
+  cock:  [['smartev','smartEV（综合钱数占比与近期胜率）'],['room1','固定押啄不服'],['room2','固定押咯无敌'],['maxplayers','押人多的队'],['follow','跟随最优（近30盘收益最高队）'],['minpool','押钱少的队'],['maxpool','押钱多的队'],['random','随机']],
+  fox:   [['smartev','smartEV（押夺冠率最高的狐·猜中5.7倍）'],['room1','固定押绿晶晶'],['room2','固定押紫莹莹'],['maxplayers','押人多的狐'],['follow','跟随最优（近30盘收益最高狐）'],['minpool','押冷门狐'],['maxpool','押热门狐'],['random','随机']],
+  foxnc: [['smartev','smartEV（押夺冠率最低的狐·猜中1.16倍）'],['room1','固定押绿晶晶'],['maxplayers','押人多的狐'],['minpool','押非冠军池较小狐'],['maxpool','押非冠军池较大狐'],['random','随机']],
 };
 function buildGamePills(id, cur){
   document.getElementById(id).innerHTML =
@@ -524,7 +528,7 @@ function buildGamePills(id, cur){
 function setBotGame(k){
   if(!CFG[k]) return;
   botGame = k;
-  buildGamePills('botpills', k); buildGamePills('simpills', k);
+  buildGamePills('botpills', k);
   document.getElementById('bot-title').textContent = `🤖 自动下注设置（${CFG[k].name}）`;
   document.getElementById('foxmode-frm').style.display = k==='fox' ? '' : 'none';
   document.getElementById('b-roomlabel').textContent = k==='steal' ? '房间' : (k==='cock' ? '队伍' : '目标');
@@ -542,10 +546,22 @@ function onFoxModeChange(){
   foxMode = parseInt(document.getElementById('f-foxmode').value,10)||1;
   buildStrategy(); refreshBot(); refreshSim();
 }
+const simCache = {};   // 每游戏模拟数据缓存: 切换瞬间渲染, 后台刷新
+const simFetching = {};
+function simKey(){ return botGame + (botGame==='fox' ? '-'+foxMode : ''); }
 async function refreshSim(){
-  let d; try {
-    d = await (await fetch(`/api/bot/sim?game=${botGame}${botGame==='fox'?`&mode=${foxMode}`:''}`)).json();
-  } catch(e){ return; }
+  const key = simKey();
+  if(simCache[key]){ renderSim(simCache[key]); }          // 先瞬时渲染缓存
+  else { document.getElementById('sim-list').innerHTML = '<div class="hint">加载中…</div>'; }
+  if(simFetching[key]) return;                             // 防重复请求
+  simFetching[key] = true;
+  try {
+    const d = await (await fetch(`/api/bot/sim?game=${botGame}${botGame==='fox'?`&mode=${foxMode}`:''}`)).json();
+    simCache[key] = d;
+    if(simKey() === key) renderSim(d);                     // 仍在该游戏才渲染
+  } catch(e){} finally { simFetching[key] = false; }
+}
+function renderSim(d){
   if(d.error){ document.getElementById('sim-list').innerHTML = '<div class="hint">'+d.error+'</div>'; return; }
   document.getElementById('sim-rounds').textContent = d.rounds;
   document.getElementById('sim-list').innerHTML = d.strats.map(s => `
@@ -640,11 +656,23 @@ async function botOff(){
     body:JSON.stringify({enabled:false})});
   refreshBot();
 }
+const botCache = {};   // 每游戏配置/状态缓存: 切换瞬时渲染
+const botFetching = {};
 async function refreshBot(){
-  const [cfg, st] = await Promise.all([
-    (await fetch(`/api/bot/config?game=${botGame}`)).json(),
-    (await fetch(`/api/bot/status?game=${botGame}`)).json() ]);
-  if((cfg.game && cfg.game!==botGame) || (st.game && st.game!==botGame)) return; // 切换竞态保护
+  const gk = botGame;
+  if(botCache[gk]){ renderBot(botCache[gk][0], botCache[gk][1]); }  // 瞬时渲染缓存
+  if(botFetching[gk]) return;
+  botFetching[gk] = true;
+  try {
+    const [cfg, st] = await Promise.all([
+      (await fetch(`/api/bot/config?game=${botGame}`)).json(),
+      (await fetch(`/api/bot/status?game=${botGame}`)).json() ]);
+    if((cfg.game && cfg.game!==botGame) || (st.game && st.game!==botGame)) return; // 切换竞态保护
+    botCache[gk] = [cfg, st];
+    if(botGame === gk) renderBot(cfg, st);
+  } catch(e){} finally { botFetching[gk] = false; }
+}
+function renderBot(cfg, st){
   if(botGame==='fox' && cfg.foxBetType){
     foxMode = cfg.foxBetType===2 ? 2 : 1;
     document.getElementById('f-foxmode').value = String(foxMode);
@@ -715,7 +743,7 @@ async function refreshGameStat(){
   } catch(e){}
 }
 setInterval(()=>{ if(!document.getElementById('bot').classList.contains('hide')) refreshGameStat(); }, 60000);
-buildGamePills('botpills', botGame); buildGamePills('simpills', botGame);
+buildGamePills('botpills', botGame);
 buildStrategy();
 setBotGame('steal');
 refreshToken();

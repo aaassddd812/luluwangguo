@@ -61,7 +61,10 @@ GAMES = {
             "slots": 6, "init": ["2001", "2011", "2012"], "refresh": ["2001", "2011"], "bet_status": 0},
 }
 STEAL = GAMES["steal"]
-COCK_ODDS = 1.95  # 斗鸡固定赔率(客户端口径, 实测)
+# 固定赔率均为"总结算倍数, 含本金"(官方规则页: 投入1彩石猜中后结算X彩石)
+COCK_ODDS = 1.95    # 斗鸡"怒翎破阵": 胜方按1.95倍结算, 负方损失本金
+FOX_ODDS = 5.7      # 赛马"绿茵疾冲"冠军盘: 猜中冠军按5.7倍结算
+FOX_NC_ODDS = 1.16  # 赛马非冠军盘: 猜中"非冠军"按1.16倍结算
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("server")
@@ -226,14 +229,20 @@ def anchor_dns(host):
 def base_picks(pools, players, round_id, seed_key):
     rooms = sorted(pools.keys())
     rnd = random.Random(seed_key)
+    by_pool = sorted(rooms, key=lambda r: pools[r])
     return {
         "roundId": round_id,
-        "minpool": min(rooms, key=lambda r: pools[r]),
-        "maxpool": max(rooms, key=lambda r: pools[r]),
+        "minpool": by_pool[0],
+        "maxpool": by_pool[-1],
         "random": rnd.choice(rooms),
         "room1": 1 if 1 in pools else rooms[0],
+        "room2": 2 if 2 in pools else (1 if 1 in pools else rooms[0]),
         "maxplayers": max(rooms, key=lambda r: players.get(r, 0)) if players
                       else max(rooms, key=lambda r: pools[r]),
+        "secondpool": by_pool[1] if len(by_pool) > 1 else by_pool[0],
+        "median": by_pool[len(by_pool) // 2],
+        "minplayers": min(rooms, key=lambda r: players.get(r, 0)) if players
+                      else by_pool[0],
     }
 
 
@@ -259,10 +268,10 @@ def fox_win_rates(win_hist, champ, slots=6):
 
 
 def compute_picks(game, pools, players, round_id, kill_counts=None, kill_window=0,
-                  win_hist=None, champ=None):
+                  win_hist=None, champ=None, last_kill_seq=None, cur_seq=0):
     """统一策略决策: 同一份池子+确定性随机 -> 实盘引擎与模拟盘选房完全一致
     smartev 各游戏口径: 逃杀=结构EV-近期被杀惩罚; 斗鸡=胜率估计×1.95赔率;
-    赛马冠军盘=历史夺冠率×池子隐含赔率(价值狐)"""
+    赛马冠军盘=历史夺冠率×5.7固定赔率(押夺冠概率最高)"""
     seed = f"round-{round_id}" if game == "steal" else f"{game}-round-{round_id}"
     picks = base_picks(pools, players, round_id, seed)
     rooms = sorted(pools.keys())
@@ -274,6 +283,9 @@ def compute_picks(game, pools, players, round_id, kill_counts=None, kill_window=
         else:
             score = r_ev
         picks["smartev"] = max(rooms, key=lambda r: score[r])
+        picks["antisafe"] = max(rooms, key=lambda r: (kill_counts or {}).get(r, 0)) if kill_counts else picks["minpool"]
+        lks = last_kill_seq or {}
+        picks["streaksafe"] = max(rooms, key=lambda r: cur_seq - lks.get(r, -1)) if lks else picks["minpool"]
     elif game == "cock":
         # 胜率估计 = 池占比与近20回合实际胜率各半
         total = sum(pools.values()) or 1.0
@@ -287,29 +299,27 @@ def compute_picks(game, pools, players, round_id, kill_counts=None, kill_window=
         n = len(recent) or 1
         score = {r: (0.5 * pools[r] / total + 0.5 * wr[r] / n) * COCK_ODDS - 1 for r in rooms}
         picks["smartev"] = max(rooms, key=lambda r: score[r])
-    else:  # fox 冠军盘
-        P = sum(pools.values())
+    else:  # fox 冠军盘: 固定5.7倍结算, EV=p×5.7-1, 即押夺冠概率最高的狐
         p = fox_win_rates(win_hist, champ, slots=len(rooms)) or {r: 1.0 / len(rooms) for r in rooms}
-        score = {r: p.get(r, 0) * FEE * P / max(pools[r], 0.1) for r in rooms}
+        score = {r: p.get(r, 0) * FOX_ODDS - 1 for r in rooms}
         picks["smartev"] = max(rooms, key=lambda r: score[r])
     return picks
 
 
 def compute_picks_nc(pools_nc, players, round_id, win_hist=None, champ=None):
-    """赛马非冠军盘(押某狐拿不到冠军): smartev=最可能落败且非冠军池中相对冷门的狐"""
+    """赛马非冠军盘(押某狐拿不到冠军): smartev=押夺冠概率最低的狐(固定1.16倍, EV=(1-p)×1.16-1)"""
     rooms = sorted(pools_nc.keys())
     if not rooms:
         return None
     picks = base_picks(pools_nc, players, round_id, f"fox-nc-round-{round_id}")
     p = fox_win_rates(win_hist, champ, slots=6) or {r: 1.0 / 6 for r in range(1, 7)}
-    P = sum(pools_nc.values())
-    score = {r: (1 - p.get(r, 1.0 / 6)) * FEE * P / max(pools_nc[r], 0.1) for r in rooms}
+    score = {r: (1 - p.get(r, 1.0 / 6)) * FOX_NC_ODDS - 1 for r in rooms}
     picks["smartev"] = max(rooms, key=lambda r: score[r])
     return picks
 
 
 def sim_settle(game, pools, room, bet, killed=None, winner=None):
-    """虚拟下注结算(模拟盘/follow元策略/采集器滚动收益用; 各游戏近似公式,
+    """虚拟下注结算(模拟盘/follow元策略/采集器滚动收益用; 斗鸡/赛马为官方固定赔率,
     实盘盈亏一律以官方 2008 allocation_amount 为准)"""
     if game == "steal":
         killed = killed or set()
@@ -321,19 +331,13 @@ def sim_settle(game, pools, room, bet, killed=None, winner=None):
         return bet + FEE * dead * bet / (alive + bet) - bet if dead > 0 else 0.0
     if game == "cock":
         return bet * (COCK_ODDS - 1) if room == winner else -bet
-    # fox 冠军盘
-    if room == winner:
-        P = sum(pools.values())
-        return bet * (FEE * P / max(pools.get(room, 0.0) + bet, 0.1) - 1) if P > 0 else 0.0
-    return -bet
+    # fox 冠军盘: 固定赔率结算(猜中5.7倍, 与池子无关)
+    return bet * (FOX_ODDS - 1) if room == winner else -bet
 
 
 def sim_settle_nc(pools_nc, room, bet, winner):
-    """赛马非冠军盘虚拟结算: 目标狐没夺冠即赢"""
-    if room != winner:
-        P = sum(pools_nc.values())
-        return bet * (FEE * P / max(pools_nc.get(room, 0.0) + bet, 0.1) - 1) if P > 0 else 0.0
-    return -bet
+    """赛马非冠军盘虚拟结算: 目标狐没夺冠即赢, 固定1.16倍(与池子无关)"""
+    return bet * (FOX_NC_ODDS - 1) if room != winner else -bet
 
 
 class Collector:
@@ -357,6 +361,8 @@ class Collector:
         self.winner = None
         self.rank = None
         self.last_killed = []
+        self.round_seq = 0       # 回合序号(streaksafe 用)
+        self.last_kill_seq = {}  # 房 -> 最后被杀序号
         self.events = []
         self.snapshot = None
         self.snapshot_nc = None
@@ -376,6 +382,16 @@ class Collector:
 
     def start(self):
         threading.Thread(target=self._run, daemon=True, name="collect-" + self.key).start()
+        # 独立心跳: 下注截止前消息可能安静(斗鸡), tick 不能只靠消息触发
+        threading.Thread(target=self._ticker, daemon=True, name="collect-tick-" + self.key).start()
+
+    def _ticker(self):
+        while True:
+            try:
+                self.tick()
+            except Exception:
+                pass
+            time.sleep(0.5)
 
     def _load_strat_hist(self):
         """预热各基础策略近30盘盈亏(follow 元策略用), 按各游戏近似公式结算"""
@@ -553,6 +569,9 @@ class Collector:
             self.players[d["roomId"]] = d.get("playerCount", 0)
         elif evt == "3004":
             self.last_killed = d.get("killedRooms") or []
+            self.round_seq += 1
+            for k in self.last_killed:
+                self.last_kill_seq[k] = self.round_seq
             self.kill_hist.extend(self.last_killed)
             del self.kill_hist[:-50]
             self.push("kill", f"回合 {d.get('roundId')} 结算: {self.last_killed} 号房被击杀")
@@ -580,10 +599,11 @@ class Collector:
             self.players = {it["item_id"]: it.get("num", 0) for it in (d.get("item_player_num") or [])}
             if r.get("win_item_id"):
                 self.winner = r.get("win_item_id")
-            st = r.get("stop_time")
+            # end_time 才是下注截止(stop_time 常为空); 游戏挂钟为 UTC+8
+            st = r.get("end_time") or r.get("stop_time")
             if st:
                 try:
-                    self.end_ms = int(time.mktime(time.strptime(st, "%Y-%m-%d %H:%M:%S")) - time.timezone) * 1000
+                    self.end_ms = int(time.mktime(time.strptime(st[:19], "%Y-%m-%d %H:%M:%S")) - 8 * 3600) * 1000
                 except Exception:
                     pass
         elif evt == "3003":
@@ -604,11 +624,15 @@ class Collector:
             if fp:
                 self.pools = fp
                 self.players = getattr(self, "_final_players", self.players)
+            fpk = getattr(self, "_final_picks", None)
+            if fpk is not None:
+                self.picks = fpk
             self._save_round(self.pools, winner=self.winner)
             self.push("kill", f"回合 {self.round_id} 胜者 {self.winner} 号队")
             self._settling = False
             self.winner = None
             self._final_pools = None
+            self._final_picks = None
 
     # ---- 赛马 ----
     def _d_fox(self, evt, d):
@@ -632,8 +656,14 @@ class Collector:
                 if self._settling:
                     pools = getattr(self, "_final_pools", None) or self.pools
                     pools_nc = getattr(self, "_final_nc", None) or self.pools_nc
+                    fp = getattr(self, "_final_picks", None)
+                    fpn = getattr(self, "_final_picks_nc", None)
+                    self.picks = fp if fp is not None else self.picks
+                    self.picks_nc = fpn if fpn is not None else self.picks_nc
                     self._save_round(pools, winner=self.winner, rank=self.rank,
                                      pools_nc=pools_nc)
+                    self._final_picks = None
+                    self._final_picks_nc = None
                     self.push("kill", f"回合 {self.round_id} 冠军 {self.winner} 号狐")
                     self._settling = False
                     self._final_pools = None
@@ -662,6 +692,8 @@ class Collector:
                 self._final_pools = dict(self.pools)
             if self.pools_nc:
                 self._final_nc = dict(self.pools_nc)
+            self._final_picks = self.picks
+            self._final_picks_nc = self.picks_nc
             self.pools = {}
             self.players = {}
             self.pools_nc = {}
@@ -717,7 +749,8 @@ class Collector:
                 for k in self.kill_hist:
                     kc[k] = kc.get(k, 0) + 1
                 self.picks = compute_picks("steal", self.snapshot, self.players, self.round_id,
-                                           kill_counts=kc, kill_window=len(self.kill_hist))
+                                           kill_counts=kc, kill_window=len(self.kill_hist),
+                                           last_kill_seq=self.last_kill_seq, cur_seq=self.round_seq)
             elif self.key == "cock":
                 self.picks = compute_picks("cock", self.snapshot, self.players, self.round_id,
                                            win_hist=self.win_hist)
@@ -747,6 +780,7 @@ class Collector:
             st["poolsNc"] = {str(k): round(v, 2) for k, v in self.pools_nc.items()}
             st["picksNc"] = self.picks_nc
             st["champ"] = {str(k): v for k, v in self.champ.items()}
+            st["winHist"] = list(self.win_hist)
         try:
             write_atomic(os.path.join(DATA, f"live_state_{self.key}.json"), st)
         except Exception:
@@ -958,10 +992,11 @@ class BetEngine:
             self.status = r.get("status")
             self.pools = {it["item_id"]: it.get("total_amount", 0) for it in (d.get("items") or [])}
             self.players = {it["item_id"]: it.get("num", 0) for it in (d.get("item_player_num") or [])}
-            st = r.get("stop_time")
+            # end_time 才是下注截止(stop_time 常为空); 游戏挂钟为 UTC+8
+            st = r.get("end_time") or r.get("stop_time")
             if st:
                 try:
-                    self.end_ms = int(time.mktime(time.strptime(st, "%Y-%m-%d %H:%M:%S")) - time.timezone) * 1000
+                    self.end_ms = int(time.mktime(time.strptime(st[:19], "%Y-%m-%d %H:%M:%S")) - 8 * 3600) * 1000
                 except Exception:
                     pass
         elif evt == "3002":
@@ -1152,8 +1187,23 @@ class BetEngine:
         elif self.game == "cock":  # smartev 本地兜底: 押池占比高的队
             total = sum(pools.values()) or 1.0
             room = max(pools, key=lambda r: pools[r] / total)
-        else:  # steal/fox smartev 本地兜底
-            room = max(pools, key=lambda r: room_ev(pools, r) if self.game == "steal" else pools[r])
+        else:  # steal/fox smartev 本地兜底(采集器决策缺失时)
+            if self.game == "steal":
+                room = max(pools, key=lambda r: room_ev(pools, r))
+            else:  # fox: 固定赔率下 smartev=夺冠率最高(冠军盘)/最低(非冠军盘)
+                p = None
+                try:
+                    with open(os.path.join(DATA, "live_state_fox.json"), encoding="utf-8") as f:
+                        st = json.load(f)
+                    p = fox_win_rates(st.get("winHist") or [],
+                                      {int(k): v for k, v in (st.get("champ") or {}).items()})
+                except Exception:
+                    pass
+                if p:
+                    pick = min if bt == 2 else max
+                    room = pick(pools, key=lambda r: p.get(r, 1.0 / 6))
+                else:
+                    room = max(pools, key=lambda r: pools[r])
         self.bet_rounds.add(self.round_id)
         # 档位组合: 官方只认固定档位, 任意 0.1 倍数金额自动组合 (0.3->0.1x3, 2->1x2)
         queue = self.compose(amt, self.tiers)
@@ -1541,6 +1591,8 @@ def compute_strat():
         pcts = []
         kh = defaultdict(int)  # 滚动50回合被杀计数(smartev多因子, 与实盘同口径)
         kq = []
+        seq_n = 0
+        last_ks = {}
         for rid, pools, killed, players in rounds:
             total = sum(pools.values())
             dead = sum(v for k, v in pools.items() if k in killed)
@@ -1553,23 +1605,32 @@ def compute_strat():
             minp = min(pools, key=lambda r: pools[r])
             maxp = max(pools, key=lambda r: pools[r])
             maxpl = max(pools, key=lambda r: players.get(r, 0)) if players else maxp
-            pre.append((rid, pools, killed, dead, total - dead, smart, minp, maxp, maxpl))
+            by_pool = sorted(pools.keys(), key=lambda r: pools[r])
+            antisafe = max(pools, key=lambda r: kh.get(r, 0)) if kq else minp
+            streaksafe = max(pools, key=lambda r: seq_n - last_ks.get(r, -1)) if last_ks else minp
+            pre.append((rid, pools, killed, dead, total - dead, smart, minp, maxp, maxpl,
+                        antisafe, by_pool[1] if len(by_pool) > 1 else by_pool[0],
+                        streaksafe, min(pools, key=lambda r: players.get(r, 0)) if players else minp,
+                        by_pool[len(by_pool) // 2]))
             for k in killed:
                 obs[k] += 1
                 kh[k] = kh.get(k, 0) + 1
                 kq.append(k)
             while len(kq) > 50:
                 kh[kq.pop(0)] -= 1
+            seq_n += 1
+            for k in killed:
+                last_ks[k] = seq_n
             for r, v in pools.items():
                 all_pairs.append((v, r in killed))
             sp = sorted(pools.values())
             first_killed = next(iter(killed))
             pcts.append(sp.index(pools[first_killed]) / (len(sp) - 1))
-        rooms = sorted({k for _, p, _, _, _, _, _, _, _ in pre for k in p})
+        rooms = sorted({k for e in pre for k in e[1]})
         exp_k = n / len(rooms)
 
         def _settle(e, room, bet=5.0):
-            _, pools, killed, dead, alive, _, _, _, _ = e
+            _, pools, killed, dead, alive = e[:5]
             if room in killed:
                 return -bet
             if dead <= 0 or alive <= 0:
@@ -1577,16 +1638,19 @@ def compute_strat():
             return bet + FEE * dead * bet / (alive + bet) - bet
 
         # ---- 六策略逐回合 room/pnl 序列(follow 元策略需要) ----
-        SKEYS = ["smartev", "minpool", "maxpool", "random", "room1", "maxplayers"]
+        SKEYS = ["smartev", "minpool", "maxpool", "random", "room1", "maxplayers",
+                 "antisafe", "secondpool", "streaksafe", "minplayers", "median"]
         seq_room = {k: [] for k in SKEYS}
         seq_pnl = {k: [] for k in SKEYS}
         for e in pre:
-            rid, pools, killed, dead, alive, smart, minp, maxp, maxpl = e
+            rid, pools, killed, dead, alive, smart, minp, maxp, maxpl = e[:9]
+            e9, e10, e11, e12, e13 = e[9:]
             rooms_here = {
                 "smartev": smart, "minpool": minp, "maxpool": maxp,
                 "random": random.Random(f"round-{rid}").choice(sorted(pools.keys())),
                 "room1": 1 if 1 in pools else None,
-                "maxplayers": maxpl,
+                "maxplayers": maxpl, "antisafe": e9, "secondpool": e10,
+                "streaksafe": e11, "minplayers": e12, "median": e13,
             }
             for k in SKEYS:
                 room = rooms_here[k]
@@ -1621,7 +1685,10 @@ def compute_strat():
         for name, idx in [("smartEV(押结构EV最高)", 5), ("minpool(押最小池)", 6),
                           ("maxpool(押最大池)", 7), ("random(基线)", None),
                           ("room1(固定押1号房)", "room1"), ("maxplayers(押人最多房)", 8),
-                          ("follow(跟随近30盘最优)", "FOLLOW")]:
+                          ("follow(跟随近30盘最优)", "FOLLOW"),
+                          ("antisafe(押近期被杀最多)", 9), ("secondpool(押池第二小)", 10),
+                          ("streaksafe(连续安全最久)", 11), ("minplayers(押人最少房)", 12),
+                          ("median(押池中位数)", 13)]:
             pnl = 0.0
             wins = 0
             cv = []
@@ -1654,7 +1721,10 @@ def compute_strat():
                 cv.append(round(pnl, 2))
             key = ("smart" if "smart" in name else "maxpool" if "maxpool" in name else
                    "random" if "random" in name else "minpool" if "minpool" in name else
-                   "room1" if "room1" in name else "maxplayers")
+                   "room1" if "room1" in name else "maxplayers" if "maxplayers" in name else
+                   "antisafe" if "antisafe" in name else "secondpool" if "secondpool" in name else
+                   "streaksafe" if "streaksafe" in name else "minplayers" if "minplayers" in name else
+                   "median")
             curves[key] = cv
             strats.append({"name": name, "wr": wins / bets_n if bets_n else 0,
                            "pnl": round(pnl, 2), "roi": pnl / (bets_n * 5) if bets_n else 0})
@@ -1842,16 +1912,30 @@ def api_bot_sim():
     if not rounds:
         return jsonify({"error": "no data"})
 
-    defs = [
-        ("smartev", "smartEV(智能优选)"),
-        ("minpool", "minpool(押最小池)"),
-        ("maxpool", "maxpool(押最大池)"),
-        ("random", "random(随机)"),
-        ("room1", "room1(固定1号)"),
-        ("maxplayers", "maxplayers(押人最多)"),
-    ]
+    NAMES = {
+        "steal": {"smartev": "smartEV(结构期望最高)", "minpool": "押最小池",
+                  "maxpool": "押最大池", "random": "随机", "room1": "固定押1号房",
+                  "room2": "固定押2号房", "maxplayers": "押人最多房"},
+        "cock": {"smartev": "smartEV(综合池占比与近期胜率)", "minpool": "押钱少的队",
+                 "maxpool": "押钱多的队", "random": "随机", "room1": "固定押啄不服",
+                 "room2": "固定押咯无敌", "maxplayers": "押人多的队"},
+        "fox": {"smartev": "smartEV(押夺冠率最高的狐)", "minpool": "押冷门狐",
+                "maxpool": "押热门狐", "random": "随机", "room1": "固定押绿晶晶",
+                "room2": "固定押紫莹莹", "maxplayers": "押人多的狐"},
+        "nc": {"smartev": "smartEV(押夺冠率最低的狐)", "minpool": "押非冠军池小狐",
+               "maxpool": "押非冠军池大狐", "random": "随机", "room1": "固定押绿晶晶",
+               "room2": "固定押紫莹莹", "maxplayers": "押人多的狐"},
+    }
+    nm = NAMES["nc"] if nc else NAMES[game]
+    defs = [(k, f"{k}({v})") for k, v in nm.items() if k != "room2" or game in ("cock", "fox")]
     if not nc:  # 非冠军盘不提供 follow(依赖各基础策略滚动收益)
         defs.append(("follow", "follow(跟随近30盘最优)"))
+        if game == "steal":  # 逃杀专属扩展策略
+            defs += [("antisafe", "antisafe(押近期被杀最多)"),
+                     ("secondpool", "secondpool(押池第二小)"),
+                     ("streaksafe", "streaksafe(押连续安全最久)"),
+                     ("minplayers", "minplayers(押人最少)"),
+                     ("median", "median(押池中位数)")]
     out = []
     BET = 5.0
     for key, name in defs:
