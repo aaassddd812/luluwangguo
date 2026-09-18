@@ -528,6 +528,7 @@ function buildGamePills(id, cur){
 function setBotGame(k){
   if(!CFG[k]) return;
   botGame = k;
+  botFormDirty = false;   // 切游戏=新表单, 恢复服务器值同步
   buildGamePills('botpills', k);
   document.getElementById('bot-title').textContent = `🤖 自动下注设置（${CFG[k].name}）`;
   document.getElementById('foxmode-frm').style.display = k==='fox' ? '' : 'none';
@@ -649,19 +650,28 @@ async function botOn(){
   const d = await (await fetch(`/api/bot/config?game=${botGame}`, {method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg)})).json();
   document.getElementById('bot-msg').textContent = d.code===0 ? '' : ('❌ '+d.msg);
-  refreshBot();
+  if(d.code===0){ botFormDirty = false; refreshBot(true); }   // 保存成功才恢复表单同步
 }
 async function botOff(){
   await fetch(`/api/bot/config?game=${botGame}`, {method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({enabled:false})});
-  refreshBot();
+  botFormDirty = false; refreshBot(true);
 }
 const botCache = {};   // 每游戏配置/状态缓存: 切换瞬时渲染
 const botFetching = {};
-async function refreshBot(){
+let botFormDirty = false;   // 用户动过表单后, 5s轮询不得回写覆盖(修复改策略被自动改回)
+(function(){
+  ['f-strategy','f-amount','f-maxloss','f-tpprofit','f-foxmode'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.addEventListener('change', ()=>{ botFormDirty = true; });
+    if(el.tagName==='INPUT') el.addEventListener('input', ()=>{ botFormDirty = true; });
+  });
+})();
+async function refreshBot(force){
   const gk = botGame;
   if(botCache[gk]){ renderBot(botCache[gk][0], botCache[gk][1]); }  // 瞬时渲染缓存
-  if(botFetching[gk]) return;
+  if(botFetching[gk] && !force) return;
   botFetching[gk] = true;
   try {
     const [cfg, st] = await Promise.all([
@@ -673,15 +683,17 @@ async function refreshBot(){
   } catch(e){} finally { botFetching[gk] = false; }
 }
 function renderBot(cfg, st){
-  if(botGame==='fox' && cfg.foxBetType){
-    foxMode = cfg.foxBetType===2 ? 2 : 1;
-    document.getElementById('f-foxmode').value = String(foxMode);
-    buildStrategy();
+  if(!botFormDirty){   // 表单没被用户动过才同步服务器值, 防止轮询覆盖未保存的选择
+    if(botGame==='fox' && cfg.foxBetType){
+      foxMode = cfg.foxBetType===2 ? 2 : 1;
+      document.getElementById('f-foxmode').value = String(foxMode);
+      buildStrategy();
+    }
+    document.getElementById('f-strategy').value = cfg.strategy||'smartev';
+    document.getElementById('f-amount').value = cfg.amount??0.1;
+    document.getElementById('f-maxloss').value = cfg.max_loss??10;
+    document.getElementById('f-tpprofit').value = cfg.take_profit??5;
   }
-  document.getElementById('f-strategy').value = cfg.strategy||'smartev';
-  document.getElementById('f-amount').value = cfg.amount??0.1;
-  document.getElementById('f-maxloss').value = cfg.max_loss??10;
-  document.getElementById('f-tpprofit').value = cfg.take_profit??5;
   const el = document.getElementById('bot-state');
   if(st.enabled && st.hellBlock){
     el.innerHTML = '<span class="dot conn"></span> 地狱模式时段·暂停下注（游戏时间19:55~21:05）';
