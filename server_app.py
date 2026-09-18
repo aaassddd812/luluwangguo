@@ -831,6 +831,8 @@ class BetEngine:
         self.hell_block = False  # 地狱模式时段禁注
         # 官方档位: 逃杀实测 {0.1,1,10}; 斗鸡/赛马 UI 含 100 档, 被拒自动降档
         self.tiers = [10.0, 1.0, 0.1] if game == "steal" else [100.0, 10.0, 1.0, 0.1]
+        self.bet_lock = threading.Lock()
+        self._started = False
 
     @staticmethod
     def compose(amount, tiers):
@@ -846,13 +848,15 @@ class BetEngine:
         return parts if rem <= 1e-6 else None
 
     def start(self):
+        # 防重入: 每次点"开始"都会调 start, 但线程只挂一对(否则多个重连循环共享 self.ws 互踩)
+        if self._started:
+            return
+        self._started = True
         threading.Thread(target=self._run, daemon=True, name=f"bet-{self.game}-{self.uid}").start()
         threading.Thread(target=self._ticker, daemon=True, name=f"bet-tick-{self.game}-{self.uid}").start()
 
     def _ticker(self):
         """独立心跳: 每0.5s检查下注窗口(不依赖消息推送触发)"""
-        import threading as _t
-        self.bet_lock = _t.Lock()
         while not self.stop_flag:
             try:
                 with self.bet_lock:
@@ -887,6 +891,16 @@ class BetEngine:
             self.ws.run_forever(sslopt={"check_hostname": False}, ping_interval=20)
             if self.stop_flag:
                 return
+            if time.time() - t0 < 30:
+                # 连接闪断(握手即被关/秒踢): 多半是锚定的CDN节点过期, 连续3次换节点
+                self._hs_fails = getattr(self, "_hs_fails", 0) + 1
+                if self._hs_fails % 3 == 0:
+                    _dns_anchored.discard(self.cfg["host"])
+                    anchor_dns(self.cfg["host"])
+                    backoff = 2
+                    self.log.info("连接闪断%d次, 已切换CDN节点", self._hs_fails)
+            else:
+                self._hs_fails = 0
             if time.time() - t0 > 600:
                 backoff = 5
             time.sleep(backoff)
