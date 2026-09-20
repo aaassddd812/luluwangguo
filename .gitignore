@@ -7,3 +7,4 @@ userid.txt
 __pycache__/
 *.pyc
 captures/
+checkin/token.json
